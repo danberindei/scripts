@@ -1,0 +1,169 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+############################################################################
+#
+# Name: sync_with_upstream
+# Author: Manik Surtani (http://github.com/maniksurtani)
+#         Galder Zamarreño (http://github.com/galderz)
+#         Dan Berindei (http://github.com/danberindei)
+# Description: This script updates a fork of an upstream repository with new
+#              changes in the upstream.  It is designed to be run on a local
+#              clone of the fork.  In addition to updating necessary branches,
+#              the script also rebases any topic branches that may exist.
+#
+# Configuration: The following variables need to be set.
+
+
+DEFAULT_UPSTREAM_REPO="upstream" # Can be a named remote, or a full URL, such as https://github.com/infinispan/infinispan
+ORIGIN_REPO="origin" # The fork of upstream.  Can be a named remote or a full URL.
+DEFAULT_BRANCHES_TO_SYNC=["master", "5.1.x"] # These need to be on both the upstream, your fork and your clone.
+TOPIC_BRANCH_PREFIX="t_" # All branches whose name starts with this will be rebased against their updated branch point
+GIT="git" # Path to the git binary executable
+
+#
+############################################################################
+
+import os
+from os import path
+import sys
+import subprocess
+import getopt
+
+upstream_repo = None
+branches = None
+checked_out_branch = None
+
+def run_git(opts):
+  print("### git %s" % opts);
+  call = [GIT]
+  for o in opts.split(' '):
+    if o != '':
+      call.append(o)
+  return subprocess.check_output(call)
+
+def init():
+  global checked_out_branch
+  # Cache current branch to be able to get it back to it after done
+  checked_out_branch = run_git("name-rev --name-only HEAD").split('\n')[0]
+  
+  if not os.path.isdir(".git"):
+    print "This script MUST be run in the local clone of your forked repo!"
+    sys.exit(1)
+
+  if have_local_changes():
+    print "You have uncommitted local changes. Please commit or stash them and try again"
+    sys.exit(2)
+
+  print "Fetching new details from upstream"
+  run_git("fetch -q %s" % upstream_repo)
+  run_git("fetch -q %s --tags" % upstream_repo)
+
+def finish():
+  run_git("checkout -q %s" % checked_out_branch)
+
+def have_local_changes():
+  output = run_git("status --porcelain --untracked-files=no")
+  return output != ""
+
+def is_push_needed(branch):
+  try:
+    branch_sha = run_git("show-ref -s refs/heads/%s" % branch)
+    origin_branch_sha = run_git("show-ref -s refs/remotes/origin/%s" % branch)
+    #print "Local hash is %s, origin hash is %s" % (branch_sha, origin_branch_sha)
+    return branch_sha != origin_branch_sha
+  except:
+    return True
+
+def is_rebase_needed(branch, release_branch):
+  merge_base_sha = run_git("merge-base %s %s" % (branch, release_branch))
+  release_branch_sha = run_git("rev-parse %s" % release_branch)
+  return merge_base_sha != release_branch_sha
+ 
+def handle_release_branches():
+  #print "Release branches are %s" % branches
+  for branch in branches:
+    if is_rebase_needed(branch, "upstream/" + branch):
+      print "Synchronizing release branch %s" % branch
+      run_git("checkout -q %s" % branch)
+      run_git("rebase -q %s/%s" % (upstream_repo, branch))
+    else:
+      print "Branch %s hasn't changed upstream" % branch
+
+    if is_push_needed(branch):
+      run_git("push -q %s %s" % (ORIGIN_REPO, branch))
+
+  run_git("push -q %s --tags" % ORIGIN_REPO)
+
+def handle_topics():
+  #print "Release branches are %s" % branches
+  ## Now handle topic branches.
+  b = run_git("branch")
+  topic_branches = filter(is_not_empty, b.replace(' ', '').replace('*','').split('\n'))
+  print "Branches are %s " % topic_branches
+  for branch in topic_branches:
+    if branch.startswith(TOPIC_BRANCH_PREFIX):
+      print "Analysing topic branch %s" % branch
+      
+      min_distance = 1000
+      base_branch = ''
+      for relbranch in branches:
+        if not relbranch.startswith(TOPIC_BRANCH_PREFIX):
+          commits = run_git("--no-pager log --pretty=format:'%%H' -n %d %s..%s" % (min_distance, relbranch, branch))
+          distance = len(commits.split('\n'))
+          if distance < min_distance:
+            base_branch = relbranch
+            min_distance = distance
+
+      if not is_rebase_needed(branch, base_branch):
+        print "Rebase not necessary for topic branch %s" % branch
+        continue
+
+      print "Rebasing using git rebase %s (%d commits to rebase)" % (base_branch, min_distance)
+      run_git("checkout %s" % branch)
+      run_git("rebase %s" % base_branch)
+      if is_push_needed(branch):
+        run_git("push -f %s %s" % (ORIGIN_REPO, branch))
+
+def is_not_empty(n):
+ return n != ''
+
+def parse_args():
+  global upstream_repo
+  global branches
+  try:
+    opts, args = getopt.getopt(sys.argv[1:], "hu:b:", ["help", "upstream_repo=", "branches="])
+  except getopt.GetoptError, err:
+    # print help information and exit:
+    print str(err) # will print something like "option -a not recognized"
+    sys.exit(2)
+
+  upstream_repo = DEFAULT_UPSTREAM_REPO
+  branches = DEFAULT_BRANCHES_TO_SYNC
+  for o, a in opts:
+    if o in ("-u", "--upstream_repo"):
+      upstream_repo = a
+      print "Upstream repo %s" % upstream_repo
+    elif o in ("-b", "--branches"):
+      branches = a.split(',')
+      print "Branches to sync up %s" % branches
+    elif o in ("-h", "--help"):
+      usage()
+      sys.exit()
+    else:
+      assert False, "unhandled option"
+
+def usage():
+  print "usage: ", sys.argv[0],"[-u <upstream repo>] [-b <comma separated branches>]"
+
+def main():
+  parse_args()
+  init()
+  handle_release_branches()
+  print "Local clone and %s synced with %s" % (ORIGIN_REPO, upstream_repo)
+  print "Now rebasing all topic branches that start with '%s'" % TOPIC_BRANCH_PREFIX
+  handle_topics()
+  finish()
+
+if __name__ == "__main__":
+  main()
