@@ -1,0 +1,16 @@
+#!/bin/python
+
+from subprocess import *
+import sys
+
+(repo, branch) = sys.argv[1].split(":")
+local_branch = repo + '_' + branch
+
+try:
+  check_call(["git", "checkout", "master"])
+  check_call(["git", "fetch", "-f", repo, branch + ":" + local_branch])
+  check_call(["git", "checkout", local_branch])
+  release_branch = check_output(['find_upstream_branch']).strip()
+  check_call(["git", "rebase", release_branch])
+except CalledProcessError as e:
+  print e

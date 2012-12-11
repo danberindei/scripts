@@ -1,0 +1,9 @@
+#!/bin/sh
+
+if [ -n "$1" ] ; then
+  REV=$1
+else
+  REV=HEAD
+fi
+BRANCH=`git rev-parse --abbrev-ref $REV`
+xdg-open https://github.com/danberindei/infinispan/tree/$BRANCH
