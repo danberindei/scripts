@@ -115,13 +115,13 @@ def handle_topics():
             base_branch = relbranch
             min_distance = distance
 
-      if not is_rebase_needed(branch, base_branch):
+      if is_rebase_needed(branch, base_branch):
+        print "Rebasing using git rebase %s (%d commits to rebase)" % (base_branch, min_distance)
+        run_git("checkout %s" % branch)
+        run_git("rebase %s" % base_branch)
+      else:
         print "Rebase not necessary for topic branch %s" % branch
-        continue
 
-      print "Rebasing using git rebase %s (%d commits to rebase)" % (base_branch, min_distance)
-      run_git("checkout %s" % branch)
-      run_git("rebase %s" % base_branch)
       if is_push_needed(branch):
         run_git("push -f %s %s" % (ORIGIN_REPO, branch))
 
