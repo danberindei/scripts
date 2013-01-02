@@ -82,6 +82,7 @@ case $TERM in
         ;;
 esac
 
+
 preexec () {
     echo -e "\033[1A`date +%H:%M:%S` "
     export LAST_CMD_START_TIME=`date +%s`
@@ -97,14 +98,21 @@ function vcs_info_prompt() {
 function notify_long_command_result() {
   LAST_CMD=`fc -ln -1`
   LAST_CMD_END_TIME=`date +%s`
-  LAST_CMD_DURATION=$(($LAST_CMD_END_TIME - $LAST_CMD_START_TIME)) 
-  if [ $LAST_CMD_DURATION -ge 30 ] ; then
+  if [ -n "$LAST_CMD_START_TIME" ] ; then
+    LAST_CMD_DURATION=$(($LAST_CMD_END_TIME - $LAST_CMD_START_TIME)) 
+    LAST_CMD_START_TIME=
+  else
+    LAST_CMD_DURATION=0
+  fi
+  if [ $LAST_CMD_DURATION -ge 10 ] ; then
     if [ $1 -ne 0 ] ; then 
       shift
-      notify-send -t 10000 "FAILED $LAST_CMD" "$LAST_CMD"
+      #notify-send -t 10000 "FAILED $LAST_CMD" "$LAST_CMD"
+      echo Failed after ${LAST_CMD_DURATION}s: $LAST_CMD
     else
       shift
-      notify-send -t 10000 "SUCCEEDED $LAST_CMD" "$LAST_CMD"
+      #notify-send -t 10000 "SUCCEEDED $LAST_CMD" "$LAST_CMD"
+      echo Finished after ${LAST_CMD_DURATION}s: $LAST_CMD
     fi
  fi
 }
