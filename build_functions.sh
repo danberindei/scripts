@@ -38,7 +38,7 @@ function big_build_function() {
       EXPLICIT_BRANCH=yes
       shift
     else
-      BRANCH=`git name-rev --name-only HEAD`
+      BRANCH=`git symbolic-ref --short HEAD`
     fi
 
     PROJECT=`basename \`pwd\``
@@ -60,27 +60,29 @@ function big_build_function() {
 
     print_and_run cd $DEST
 
-    # allow "all" instead of the module name so that the user can specify other arguments after
+    # try to parse as many arguments as possible as module names
     MODULE_ARGS="" ; 
-    if [ -z "$1" ] ; then
-        # do nothing
-    elif [ "all" = "$1" ] ; then
-        shift
-    else
+    while [ -d "$1" ] ; do
+      if [ -z "$MODULE_ARGS" ] ; then
         MODULE_ARGS="-pl $1"
-        shift
-    fi
+      else
+        MODULE_ARGS="$MODULE_ARGS,$1"
+      fi
+      shift
+    done
+
+    echo Building modules $MODULE_ARGS
     EXTRA_ARGS="$*"
 
     if [ $CLEAN_BUILD -eq 1 ] ; then
-      print_and_run mvn -P-extra clean ${=MODULE_ARGS} ${=EXTRA_ARGS}
+      print_and_run mvn -nsu -P-extra clean ${=MODULE_ARGS} ${=EXTRA_ARGS}
     fi
     if [ $? -ne 0 ] ; then
       exit 9
     fi
 
     if [ $BUILD -eq 1 ] ; then
-      print_and_run mvn -P-extra install -DskipTests -am ${=MODULE_ARGS} ${=EXTRA_ARGS}
+      print_and_run mvn -nsu -P-extra install -DskipTests -am ${=MODULE_ARGS} ${=EXTRA_ARGS}
     fi
     if [ $? -ne 0 ] ; then
       exit 9
