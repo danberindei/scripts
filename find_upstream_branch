@@ -84,10 +84,10 @@ def find_upstream_branch():
   global branch
 
   if branch == None:
-    branch = run_git("name-rev --name-only HEAD").split('\n')[0]
+    branch = run_git("symbolic-ref --short HEAD").split('\n')[0]
   print("Analysing topic branch %s" % branch, file=sys.stderr)
 
-  #base_branch = subprocess.check_output("git rev-list --topo-order %s %s | git name-rev --name-only --stdin | egrep -m1 '%s'" %
+  #base_branch = subprocess.check_output("git rev-list --topo-order %s %s | git symbolic-ref --short --stdin | egrep -m1 '%s'" %
   #    (branch, " ".join(rel_branches), "|".join(rel_branches)), shell=True).strip()
   min_commits = 1000
   base_branch = "no_such_base_branch"

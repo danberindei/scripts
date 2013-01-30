@@ -30,12 +30,15 @@ import sys
 import subprocess
 import getopt
 
+isdebug = False
 upstream_repo = None
 branches = None
 checked_out_branch = None
 
 def run_git(opts):
-  print("### git %s" % opts);
+  if isdebug:
+    print("### git %s" % opts)
+
   call = [GIT]
   for o in opts.split(' '):
     if o != '':
@@ -45,7 +48,7 @@ def run_git(opts):
 def init():
   global checked_out_branch
   # Cache current branch to be able to get it back to it after done
-  checked_out_branch = run_git("name-rev --name-only HEAD").split('\n')[0]
+  checked_out_branch = run_git("symbolic-ref --short HEAD").split('\n')[0]
   
   if not os.path.isdir(".git"):
     print "This script MUST be run in the local clone of your forked repo!"
@@ -91,7 +94,7 @@ def handle_release_branches():
       print "Branch %s hasn't changed upstream" % branch
 
     if is_push_needed(branch):
-      run_git("push -q %s %s" % (ORIGIN_REPO, branch))
+      run_git("push -q -f %s %s" % (ORIGIN_REPO, branch))
 
   run_git("push -q %s --tags" % ORIGIN_REPO)
 
@@ -103,7 +106,7 @@ def handle_topics():
   print "Branches are %s " % topic_branches
   for branch in topic_branches:
     if branch.startswith(TOPIC_BRANCH_PREFIX):
-      print "Analysing topic branch %s" % branch
+      #print "Analysing topic branch %s" % branch
       
       min_distance = 1000
       base_branch = ''
@@ -123,7 +126,11 @@ def handle_topics():
         print "Rebase not necessary for topic branch %s" % branch
 
       if is_push_needed(branch):
+        print "Pushing branch %s to %s" % (branch, ORIGIN_REPO)
         run_git("push -f %s %s" % (ORIGIN_REPO, branch))
+      else:
+        #print "Push not necessary for topic branch %s" % branch
+        pass
 
 def is_not_empty(n):
  return n != ''
@@ -131,8 +138,9 @@ def is_not_empty(n):
 def parse_args():
   global upstream_repo
   global branches
+  global isdebug
   try:
-    opts, args = getopt.getopt(sys.argv[1:], "hu:b:", ["help", "upstream_repo=", "branches="])
+    opts, args = getopt.getopt(sys.argv[1:], "hdu:b:", ["help", "debug", "upstream_repo=", "branches="])
   except getopt.GetoptError, err:
     # print help information and exit:
     print str(err) # will print something like "option -a not recognized"
@@ -150,6 +158,8 @@ def parse_args():
     elif o in ("-h", "--help"):
       usage()
       sys.exit()
+    elif o in ("-d", "--debug"):
+      isdebug = True
     else:
       assert False, "unhandled option"
 
