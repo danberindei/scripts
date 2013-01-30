@@ -1,0 +1,5 @@
+#compdef remove_topic_branch
+
+_arguments -w -C -s \
+    '*:branches:__git_branch_names'
+
