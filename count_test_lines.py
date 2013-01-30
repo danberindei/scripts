@@ -43,7 +43,7 @@ for line in fileinput.input():
 
   if previous_test:
     tests[previous_test] += 1
-  else:
+  elif previous_orphan:
     orphan_threads[previous_orphan] += 1
 
 
