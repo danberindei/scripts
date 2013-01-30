@@ -29,18 +29,19 @@ def main():
    # 2011-06-22 17:49:44,732 DEBUG
    # 2011-07-27 11:46:45,282 35195 TRACE
    # 11:46:45,282 TRACE
-   messageStartFilter = re.compile('(\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2},\d{3}( \d+)? (FATAL|ERROR|WARN|INFO|DEBUG|TRACE)')
+   possibleMessageStartFilters = [re.compile('^\d{4}-\d{2}-\d{2} '), re.compile('^\d{2}:\d{2}:\d{2},\d{3} ')]
    messageFilter = re.compile(pattern, re.MULTILINE | re.DOTALL)
 
    f = fileinput.input(files)
-   message = ""
+   message = next(f)
+   messageStartFilter = next(x for x in possibleMessageStartFilters if x.match(message))
 
    for line in f:
       if messageStartFilter.match(line):
          handleMessage(message, messageFilter)
          message = line
       else:
-         message = message + line
+         message += line
 
    handleMessage(message, messageFilter)
 
