@@ -86,6 +86,7 @@ esac
 preexec () {
     echo -e "\033[1A`date +%H:%M:%S` "
     export LAST_CMD_START_TIME=`date +%s`
+    print -Pn "\e]0;* %~ ${vcs_info_msg_0_}: %n@%m\a"
 }
 
 function vcs_info_prompt() {
