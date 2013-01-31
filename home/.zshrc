@@ -109,11 +109,11 @@ function notify_long_command_result() {
     if [ $1 -ne 0 ] ; then 
       shift
       #notify-send -t 10000 "FAILED $LAST_CMD" "$LAST_CMD"
-      echo Failed after ${LAST_CMD_DURATION}s: $LAST_CMD
+      echo `date +%H:%M:%S` Failed after ${LAST_CMD_DURATION}s: $LAST_CMD
     else
       shift
       #notify-send -t 10000 "SUCCEEDED $LAST_CMD" "$LAST_CMD"
-      echo Finished after ${LAST_CMD_DURATION}s: $LAST_CMD
+      echo `date +%H:%M:%S` Finished after ${LAST_CMD_DURATION}s: $LAST_CMD
     fi
  fi
 }
