@@ -1,4 +1,4 @@
-#!/bin/python
+#!/usr/bin/python
 
 from subprocess import *
 import sys
@@ -7,7 +7,16 @@ import sys
 local_branch = repo + '_' + branch
 
 try:
-  check_call(["git", "checkout", "master"])
+  remotes = check_output(["git", "remote"]).split("\n")
+  #print "remotes %s" % remotes
+  remote_exists = repo in remotes
+  if not remote_exists:
+    check_call(["git", "remote", "add", repo, "git://github.com/%s/infinispan.git" % repo])
+
+  current_branch = check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+  if current_branch == local_branch:
+    check_call(["git", "checkout", "master"])
+
   check_call(["git", "fetch", "-f", repo, branch + ":" + local_branch])
   check_call(["git", "checkout", local_branch])
   release_branch = check_output(['find_upstream_branch']).strip()
