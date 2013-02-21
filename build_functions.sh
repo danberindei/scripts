@@ -5,7 +5,7 @@ function print_and_run() {
   CMD=$1 ; shift
   $CMD ${=*}
   if [ $? -ne 0 ] ; then
-    exit 9
+    return 9
   fi
 }
 
@@ -92,7 +92,7 @@ function big_build_function() {
       if [ $DEBUG -ne 1 ] ; then
         MAVEN_DEBUG_OPTS=""
       fi
-      MAVEN_OPTS="$MAVEN_OPTS $MAVEN_DEBUG_OPTS $MAVEN_LOG_OPTS $EXTRA_TEST_OPTS" print_and_run mvn test ${=MODULE_ARGS} ${=EXTRA_ARGS}
+      MAVEN_OPTS="$MAVEN_OPTS $MAVEN_DEBUG_OPTS $MAVEN_LOG_OPTS $EXTRA_TEST_OPTS" print_and_run mvn surefire:test ${=MODULE_ARGS} ${=EXTRA_ARGS}
       ERRCODE=$?
 #      if [ $ERRCODE -ne 0 ] ; then
 #        print_and_run popd
