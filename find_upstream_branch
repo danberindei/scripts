@@ -42,11 +42,13 @@ def find_rel_branches():
   if not os.path.isdir(".git"):
     print("This script MUST be run in the local clone of your forked repo!", file=sys.stderr)
     sys.exit(1)
-  branches = [x.split('/')[1] for x in run_git("branch -r").split('\n') if upstream_repo in x]
-  if len(branches) == 0:
+  upstream_branches = [x.split('/')[1] for x in run_git("branch -r").split('\n') if upstream_repo in x]
+  release_branches = [x.strip() for x in run_git("branch").split('\n') if x.strip() in upstream_branches]
+  if len(release_branches) == 0:
       print("Can't find any release branches! Make sure you have run `git fetch %s` first" % upstream_repo, file=sys.stderr)
       exit(1)
-  return branches
+  #print "Release branches are %s" % release_branches
+  return release_branches
 
 def parse_args():
   global upstream_repo
