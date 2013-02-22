@@ -17,7 +17,7 @@
 
 DEFAULT_UPSTREAM_REPO="upstream" # Can be a named remote, or a full URL, such as https://github.com/infinispan/infinispan
 ORIGIN_REPO="origin" # The fork of upstream.  Can be a named remote or a full URL.
-DEFAULT_BRANCHES_TO_SYNC=["master", "5.1.x"] # These need to be on both the upstream, your fork and your clone.
+DEFAULT_BRANCHES_TO_SYNC=["master", "5.1.x", "5.2.x"] # These need to be on both the upstream, your fork and your clone.
 TOPIC_BRANCH_PREFIX="t_" # All branches whose name starts with this will be rebased against their updated branch point
 GIT="git" # Path to the git binary executable
 
