@@ -9,7 +9,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/home/dan/tools/hsdis
 export PATH=$PATH:$JAVA_HOME/bin:$JRUBY_HOME/bin:$HOME/bin
 
 # maven
-MAVEN_OPTS="-ea -server -XX:+AggressiveOpts -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:+UseParNewGC -XX:NewRatio=4"
+export MAVEN_OPTS="-ea -server -XX:+AggressiveOpts -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:+UseParNewGC -XX:NewRatio=4"
 
 # extra zsh autocompletion options
-fpath=( $fpath ~/bin/zsh )
+export FPATH=$FPATH:~/bin/zsh
