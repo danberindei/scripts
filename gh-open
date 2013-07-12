@@ -7,4 +7,5 @@ else
 fi
 BRANCH=`git rev-parse --abbrev-ref $REV`
 REMOTE=`git config --get remote.origin.url | sed -n 's/^.*:\(.*\)\.git/\1/ p'`
-xdg-open https://github.com/$REMOTE/tree/$BRANCH
+#xdg-open https://github.com/$REMOTE/tree/$BRANCH
+google-chrome https://github.com/$REMOTE/tree/$BRANCH
