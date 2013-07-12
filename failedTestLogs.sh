@@ -3,10 +3,10 @@
 DIR=`dirname $0`
 #echo dir=$DIR
 
-if [ -f "$1" ] ; then FILE=$1 ; shift ; fi
+if [ -r "$1" ] ; then FILE=$1 ; shift ; fi
 if [ -n "$1" ] ; then FAILED_TESTS="$*" ; fi
 
-if [ ! -f "$FILE" ] ; then
+if [ -z "$FILE" ] ; then
   FILE=`ls -t infinispan.log* | head -1`
 fi
 
@@ -27,7 +27,7 @@ fi
 echo Failed/skipped tests: $FAILED_TESTS 
 
 for TEST in $FAILED_TESTS ; do
-  SHORTNAME=`perl -e '$t = $ARGV[0]; chomp $t; $t =~ s/[a-z]//g; print $t;' $TEST`
+  SHORTNAME=`perl -e '$t = $ARGV[0]; chomp $t; $t =~ s/[-a-z]//g; print $t;' $TEST`
   LOWSHORTNAME=`perl -e 'print lc $ARGV[0];' $SHORTNAME`
   echo "Writing $TEST log to $LOWSHORTNAME.log"
   $CAT $FILE | $DIR/greplog.py "\b$TEST\b" | perl -npe "s/$TEST-Node/Node/g" > $LOWSHORTNAME.log
