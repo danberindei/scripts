@@ -85,8 +85,10 @@ esac
 
 preexec () {
     echo -e "\033[1A`date +%H:%M:%S` "
-    export LAST_CMD_START_TIME=`date +%s`
-    print -Pn "\e]0;* %~ ${vcs_info_msg_0_}: %n@%m\a"
+    export LAST_CMD="$1"
+    export LAST_CMD_START_TIME=$(date +%s)
+    export EXEC_WINDOW_NAME="$(print -Pn "* %~ ${vcs_info_msg_0_}: %n@%m")"
+    print -Pn "\e]0;$EXEC_WINDOW_NAME\a"
 }
 
 function vcs_info_prompt() {
@@ -97,25 +99,31 @@ function vcs_info_prompt() {
 }
 
 function notify_long_command_result() {
-  LAST_CMD=`fc -ln -1`
-  LAST_CMD_END_TIME=`date +%s`
-  if [ -n "$LAST_CMD_START_TIME" ] ; then
-    LAST_CMD_DURATION=$(($LAST_CMD_END_TIME - $LAST_CMD_START_TIME)) 
-    LAST_CMD_START_TIME=
-  else
-    LAST_CMD_DURATION=0
+  LAST_CMD_END_TIME=$(date +%s)
+  FOCUSED_WINDOW_NAME=$(xprop -id $(xprop -root 32x '\t$0' _NET_ACTIVE_WINDOW | cut -f 2) _NET_WM_NAME | cut -d\" -f2 2>/dev/null)
+  if [ -z "$LAST_CMD" ] ; then
+    return
   fi
-  if [ $LAST_CMD_DURATION -ge 10 ] ; then
+
+  LAST_CMD_DURATION=$(($LAST_CMD_END_TIME - $LAST_CMD_START_TIME))
+  if [ $LAST_CMD_DURATION -ge 5 ] ; then
     if [ $1 -ne 0 ] ; then 
       shift
-      #notify-send -t 10000 "FAILED $LAST_CMD" "$LAST_CMD"
+      if [ "$FOCUSED_WINDOW_NAME" != "$EXEC_WINDOW_NAME" ] ; then
+        notify-send --hint=int:transient:1 -i error "FAILED" "$LAST_CMD"
+      fi
       echo `date +%H:%M:%S` Failed after ${LAST_CMD_DURATION}s: $LAST_CMD
     else
       shift
-      #notify-send -t 10000 "SUCCEEDED $LAST_CMD" "$LAST_CMD"
+      if [ "$FOCUSED_WINDOW_NAME" != "$EXEC_WINDOW_NAME" ] ; then
+        notify-send --hint=int:transient:1 -i info "SUCCEEDED" "$LAST_CMD"
+      fi
       echo `date +%H:%M:%S` Finished after ${LAST_CMD_DURATION}s: $LAST_CMD
-    fi
+   fi
  fi
+ export LAST_CMD=
+ export LAST_CMD_START_TIME=
+ export EXEC_WINDOW_NAME=
 }
 
 
@@ -151,12 +159,9 @@ alias gsl='git stash list'
 alias gre='git rebase'
 alias gri='git rebase -i'
 alias grc='git rebase --continue'
-alias grs='git rebase --skip'
 alias gdiff='git diff'
 alias gcommit='git commit'
 alias gfetch='git fetch'
 alias gpull='git pull'
 alias gpush='git push'
-
-#. ~/Work/build_functions.sh
 
