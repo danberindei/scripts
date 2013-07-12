@@ -4,7 +4,7 @@ from subprocess import *
 import sys
 
 (repo, branch) = sys.argv[1].split(":")
-local_branch = repo + '_' + branch
+local_branch = repo + '_' + branch.replace('/', '_')
 
 try:
   remotes = check_output(["git", "remote"]).split("\n")
