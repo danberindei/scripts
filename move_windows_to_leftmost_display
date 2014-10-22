@@ -1,0 +1,34 @@
+#!/bin/bash
+ 
+# screen width (the effective resolution! just set yours here.)
+screen_width1=1920
+screen_width2=1920
+
+window_ids=$(wmctrl -l | awk '{print $1}')
+echo "Window ids: $window_ids"
+
+for window in $window_ids ; do
+  x=$(xwininfo -id $window | grep "Absolute upper-left X" | awk '{print $4}')
+  y=$(xwininfo -id $window | grep "Absolute upper-left Y" | awk '{print $4}')
+  w=$(xwininfo -id $window | grep "Width" | awk '{print $2}')
+
+  if [ "$x" -ge "$screen_width1" ]; then
+    newx=$((x - 2 * screen_width1 + screen_width2))
+    echo "Moving window $(wmctrl -l | grep $window) from $x,$y + $w to $newx,$y"
+
+    maximized=false
+    if [ "$w" -eq "$screen_width2" ]; then
+        maximized=true
+    fi
+
+    if $maximized; then
+        wmctrl -ir $window -b remove,maximized_vert,maximized_horz
+    fi
+ 
+    wmctrl -ir $window -e 0,$newx,$y,-1,-1
+ 
+    if $maximized; then
+        wmctrl -ir $window -b add,maximized_vert,maximized_horz
+    fi
+  fi
+done
