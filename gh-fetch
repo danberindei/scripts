@@ -2,16 +2,37 @@
 
 from subprocess import *
 import sys
+import os
+import restkit
+import json
+import re
+from pprint import pprint
 
-(repo, branch) = sys.argv[1].split(":")
-local_branch = repo + '_' + branch.replace('/', '_')
+base_url = 'https://api.github.com/'
+
+pr = sys.argv[1]
+match = re.match(r"https://github.com/(\w+)/(\w+)/pull/(\d+)", pr)
+if match:
+  # PR url
+  resource = restkit.Resource(base_url)
+  path = '/repos/%s/%s/pulls/%s' % (match.group(1), match.group(2), match.group(3))
+  response = resource.get(path, headers={'Accept': 'application/json'})
+  json = json.loads(response.body_string())
+  head_branch = json['head']['label'];
+else:
+  # repo:branch
+  head_branch = pr
+
+(repo, branch) = head_branch.split(":")
+local_branch = 'pr_' + repo + '_' + branch.replace('/', '_')
+project = os.path.basename(os.getcwd())
 
 try:
   remotes = check_output(["git", "remote"]).split("\n")
   #print "remotes %s" % remotes
   remote_exists = repo in remotes
   if not remote_exists:
-    check_call(["git", "remote", "add", repo, "git://github.com/%s/infinispan.git" % repo])
+    check_call(["git", "remote", "add", repo, "git://github.com/%s/%s.git" % (repo, project)])
 
   current_branch = check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
   if current_branch == local_branch:
@@ -20,6 +41,7 @@ try:
   check_call(["git", "fetch", "-f", repo, branch + ":" + local_branch])
   check_call(["git", "checkout", local_branch])
   release_branch = check_output(['find_upstream_branch']).strip()
-  check_call(["git", "rebase", release_branch])
+  check_call(["git", "branch", "-u", release_branch])
+  check_call(["git", "rebase", "-f", release_branch])
 except CalledProcessError as e:
   print e
