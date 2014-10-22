@@ -26,9 +26,13 @@ if [ -z "$FAILED_TESTS" ] ; then
 fi
 echo Failed/skipped tests: $FAILED_TESTS 
 
+BRANCH=$(cat branch)
+
+DATE=$(date +%Y%m%d)
 for TEST in $FAILED_TESTS ; do
-  SHORTNAME=`perl -e '$t = $ARGV[0]; chomp $t; $t =~ s/[-a-z]//g; print $t;' $TEST`
-  LOWSHORTNAME=`perl -e 'print lc $ARGV[0];' $SHORTNAME`
-  echo "Writing $TEST log to $LOWSHORTNAME.log"
-  $CAT $FILE | $DIR/greplog.py "\b$TEST\b" | perl -npe "s/$TEST-Node/Node/g" > $LOWSHORTNAME.log
+  #SHORTNAME=`perl -e '$t = $ARGV[0]; chomp $t; $t =~ s/[-a-z]//g; print $t;' $TEST`
+  #LOWSHORTNAME=`perl -e 'print lc $ARGV[0];' $SHORTNAME`
+  TESTFILE=$(echo ${TEST}_${BRANCH}_${DATE}.log | tr / _)
+  echo "Writing $TEST log to $TESTFILE"
+  $CAT $FILE | $DIR/greplog.py "\(.*\b$TEST\b.*\) \[" | perl -npe "s/$TEST-Node/Node/g" > $TESTFILE
 done
