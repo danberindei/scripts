@@ -30,6 +30,22 @@ import sys
 import subprocess
 import getopt
 
+# monkey-patch subprocess.check_output in python 2.6.x
+if "check_output" not in dir( subprocess ): # duck punch it in!
+    def f(*popenargs, **kwargs):
+        if 'stdout' in kwargs:
+            raise ValueError('stdout argument not allowed, it will be overridden.')
+        process = subprocess.Popen(stdout=subprocess.PIPE, *popenargs, **kwargs)
+        output, unused_err = process.communicate()
+        retcode = process.poll()
+        if retcode:
+            cmd = kwargs.get("args")
+            if cmd is None:
+                cmd = popenargs[0]
+            raise subprocess.CalledProcessError(retcode, cmd)
+        return output
+    subprocess.check_output = f
+
 isdebug = False
 upstream_repo = None
 branches = None
@@ -48,7 +64,8 @@ def run_git(opts):
 def init():
   global checked_out_branch
   # Cache current branch to be able to get it back to it after done
-  checked_out_branch = run_git("symbolic-ref --short HEAD").split('\n')[0]
+  #checked_out_branch = run_git("symbolic-ref --short HEAD").split('\n')[0]
+  checked_out_branch = run_git("symbolic-ref HEAD").replace("refs/heads/", "").split('\n')[0]
   
   if not os.path.isdir(".git"):
     print "This script MUST be run in the local clone of your forked repo!"
@@ -147,7 +164,11 @@ def parse_args():
     sys.exit(2)
 
   upstream_repo = DEFAULT_UPSTREAM_REPO
-  branches = DEFAULT_BRANCHES_TO_SYNC
+
+  branches = run_git("config sync.releaseBranches").split()
+  if branches == "":
+    branches = DEFAULT_BRANCHES_TO_SYNC
+
   for o, a in opts:
     if o in ("-u", "--upstream_repo"):
       upstream_repo = a
