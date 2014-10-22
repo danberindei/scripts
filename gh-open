@@ -2,10 +2,21 @@
 
 if [ -n "$1" ] ; then
   REV=$1
+  shift
 else
   REV=HEAD
 fi
+
+if [ -n "$1" ] ; then
+  BASE_REPO=$REV
+  REV=$1
+else
+  BASE_REPO=upstream
+fi
+
 BRANCH=`git rev-parse --abbrev-ref $REV`
+BASE_BRANCH=`find_upstream_branch -u $BASE_REPO $BRANCH`
 REMOTE=`git config --get remote.origin.url | sed -n 's/^.*:\(.*\)\.git/\1/ p'`
+BASE_REMOTE=`git config --get remote.${BASE_REPO}.url | sed -n 's/^.*:\(.*\)\/.*\.git/\1/ p'`
 #xdg-open https://github.com/$REMOTE/tree/$BRANCH
-google-chrome https://github.com/$REMOTE/tree/$BRANCH
+google-chrome "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
