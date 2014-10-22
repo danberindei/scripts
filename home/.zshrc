@@ -147,6 +147,10 @@ logs=~/Work/logs
 
 alias l=less
 alias ll='ls -lh'
+alias mv='mv -i'
+alias rm='rm -i'
+alias df='df -h'
+alias du='du -h'
 alias jps='jps -l'
 alias mvn='mvn -P-extra'
 
