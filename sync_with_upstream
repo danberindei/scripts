@@ -18,7 +18,7 @@
 DEFAULT_UPSTREAM_REPO="upstream" # Can be a named remote, or a full URL, such as https://github.com/infinispan/infinispan
 ORIGIN_REPO="origin" # The fork of upstream.  Can be a named remote or a full URL.
 DEFAULT_BRANCHES_TO_SYNC=["master", "5.2.x", "5.3.x"] # These need to be on both the upstream, your fork and your clone.
-TOPIC_BRANCH_PREFIX="t_" # All branches whose name starts with this will be rebased against their updated branch point
+DEFAULT_TOPIC_BRANCH_PREFIX="t_" # All branches whose name starts with this will be rebased against their updated branch point
 GIT="git" # Path to the git binary executable
 
 #
@@ -49,6 +49,7 @@ if "check_output" not in dir( subprocess ): # duck punch it in!
 isdebug = False
 upstream_repo = None
 branches = None
+topic_branch_prefix = None
 checked_out_branch = None
 
 def run_git(opts):
@@ -103,14 +104,14 @@ def is_rebase_needed(branch, release_branch):
 def handle_release_branches():
   #print "Release branches are %s" % branches
   for branch in branches:
-    if is_rebase_needed(branch, "upstream/" + branch):
+    if is_rebase_needed(branch, upstream_repo + "/" + branch):
       print "Synchronizing release branch %s" % branch
       run_git("checkout -q %s" % branch)
       run_git("rebase -q %s/%s" % (upstream_repo, branch))
     else:
       print "Branch %s hasn't changed upstream" % branch
 
-    if is_push_needed(branch):
+    if upstream_repo != ORIGIN_REPO and is_push_needed(branch):
       run_git("push -q -f %s %s" % (ORIGIN_REPO, branch))
 
   run_git("push -q %s --tags" % ORIGIN_REPO)
@@ -122,13 +123,13 @@ def handle_topics():
   topic_branches = filter(is_not_empty, b.replace(' ', '').replace('*','').split('\n'))
   print "Branches are %s " % topic_branches
   for branch in topic_branches:
-    if branch.startswith(TOPIC_BRANCH_PREFIX):
+    if branch.startswith(topic_branch_prefix):
       #print "Analysing topic branch %s" % branch
       
       min_distance = 1000
       base_branch = ''
       for relbranch in branches:
-        if not relbranch.startswith(TOPIC_BRANCH_PREFIX):
+        if not relbranch.startswith(topic_branch_prefix):
           commits = run_git("--no-pager log --pretty=format:'%%H' -n %d %s..%s" % (min_distance, relbranch, branch))
           distance = len(commits.split('\n'))
           if distance < min_distance:
@@ -156,6 +157,7 @@ def parse_args():
   global upstream_repo
   global branches
   global isdebug
+  global topic_branch_prefix
   try:
     opts, args = getopt.getopt(sys.argv[1:], "hdu:b:", ["help", "debug", "upstream_repo=", "branches="])
   except getopt.GetoptError, err:
@@ -163,11 +165,18 @@ def parse_args():
     print str(err) # will print something like "option -a not recognized"
     sys.exit(2)
 
-  upstream_repo = DEFAULT_UPSTREAM_REPO
+  upstream_repo = run_git("config sync.upstreamRepo").strip()
+  if upstream_repo == "":
+    upstream_repo = DEFAULT_UPSTREAM_REPO
 
   branches = run_git("config sync.releaseBranches").split()
   if branches == "":
     branches = DEFAULT_BRANCHES_TO_SYNC
+
+  try:
+    topic_branch_prefix = run_git("config sync.topicBranchPrefix").strip()
+  except Exception:
+    topic_branch_prefix = DEFAULT_TOPIC_BRANCH_PREFIX
 
   for o, a in opts:
     if o in ("-u", "--upstream_repo"):
@@ -192,7 +201,7 @@ def main():
   init()
   handle_release_branches()
   print "Local clone and %s synced with %s" % (ORIGIN_REPO, upstream_repo)
-  print "Now rebasing all topic branches that start with '%s'" % TOPIC_BRANCH_PREFIX
+  print "Now rebasing all topic branches that start with '%s'" % topic_branch_prefix
   handle_topics()
   finish()
 
