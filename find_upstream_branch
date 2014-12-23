@@ -21,10 +21,12 @@ import getopt
 
 
 # Configuration: The following variables need to be set.
-DEFAULT_UPSTREAM_REPO="upstream" # Can be a named remote, or a full URL, such as https://github.com/infinispan/infinispan
 TOPIC_BRANCH_PREFIX="t_" # All branches whose name starts with this will be rebased against their updated branch point
 GIT="git" # Path to the git binary executable
 
+# The following variables need to be set in the git config:
+# * sync.upstreamRepo - The upstream repo, usually upstream (if you have your own fork) or origin.
+# * sync.releaseBranches - The release branches you want to sync with, must exist in the upstream repo.
 
 upstream_repo = None
 rel_branches = None
@@ -38,17 +40,22 @@ def run_git(opts):
       call.append(o)
   return subprocess.check_output(call)
 
+def find_upstream_repo():
+  try:
+    upstream = run_git("config sync.upstreamRepo").strip()
+    return upstream
+  except Exception:
+    print("Can't find the upstream repo! Make sure you have configured sync.upstreamRepo in this repository.", file=sys.stderr)
+    exit(1)
+
 def find_rel_branches():
-  if not os.path.isdir(".git"):
-    print("This script MUST be run in the local clone of your forked repo!", file=sys.stderr)
-    sys.exit(1)
-  upstream_branches = [x.split('/')[1] for x in run_git("branch -r").split('\n') if upstream_repo in x]
-  release_branches = [x.strip() for x in run_git("branch").split('\n') if x.strip() in upstream_branches]
-  if len(release_branches) == 0:
-      print("Can't find any release branches! Make sure you have run `git fetch %s` first" % upstream_repo, file=sys.stderr)
-      exit(1)
-  #print "Release branches are %s" % release_branches
-  return release_branches
+  try:
+    release_branches = run_git("config sync.releaseBranches").split()
+    #print "Release branches are %s" % release_branches
+    return release_branches
+  except Exception:
+    print("Can't find any release branches! Make sure you have configured sync.releaseBranches in this repository.", file=sys.stderr)
+    exit(1)
 
 def parse_args():
   global upstream_repo
@@ -62,7 +69,7 @@ def parse_args():
     print(str(err), file=sys.stderr) # will print something like "option -a not recognized"
     sys.exit(2)
 
-  upstream_repo = DEFAULT_UPSTREAM_REPO
+  upstream_repo = None
   rel_branches = None
   for o, a in opts:
     if o in ("-u", "--upstream_repo"):
@@ -75,6 +82,7 @@ def parse_args():
     else:
       assert False, "unhandled option"
 
+  if upstream_repo == None: upstream_repo = find_upstream_repo()
   if rel_branches == None: rel_branches = find_rel_branches()
 
   if (len(args) > 0): branch = args[0]
