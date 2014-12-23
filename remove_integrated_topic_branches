@@ -1,0 +1,31 @@
+#!/bin/sh
+
+PR_BRANCH_PREFIX=pr_
+TOPIC_BRANCH_PREFIX=$(git config sync.topicBranchPrefix)
+RELEASE_BRANCHES=$(git config sync.releaseBranches)
+
+for b in $RELEASE_BRANCHES ; do
+  echo For release branch $b
+  for tb in $(git branch --merged $b | tr -d '* ' | grep "^$TOPIC_BRANCH_PREFIX") ; do
+    echo Removing integrated topic branch $tb merged in $b
+    git checkout -q $b
+    git push origin :$tb
+    git branch -d $tb
+  done
+done
+
+for prb in $(git branch | grep PR_BRANCH_PREFIX | tr -d '*') ; do git checkout -q $prb ; git rebase -q $(find_upstream_branch) &>/dev/null || git rebase --abort ; done
+#git checkout -q master
+git reset
+
+for b in $RELEASE_BRANCHES ; do
+  echo For release branch $b
+  for prb in $(git branch --merged $b | grep pr_ | tr -d '*') ; do
+    echo Removing PR review branch $prb merged in $b
+    git checkout -q $b
+    git branch -d $prb
+  done
+done
+
+echo Topic branches not integrated yet: $(git branch | grep t_ | tr -d '*')
+echo PR branches not integrated yet: $(git branch | grep pr_ | tr -d '*')
