@@ -3,12 +3,8 @@
 DIR=`dirname $0`
 #echo dir=$DIR
 
-if [ -r "$1" ] ; then FILE=$1 ; shift ; fi
-if [ -n "$1" ] ; then FAILED_TESTS="$*" ; fi
-
-if [ -z "$FILE" ] ; then
-  FILE=`ls -t infinispan.log* | head -1`
-fi
+FILE=$1 ; shift
+FAILED_TESTS="$*"
 
 CAT=cat
 if [ "${FILE##*.}" == "gz" ] ; then
@@ -16,7 +12,7 @@ if [ "${FILE##*.}" == "gz" ] ; then
 fi
 
 if [ ! -f "$FILE" ] ; then
-  echo "Could not find infinispan.log or infinispan.log.gz"
+  echo "Could not read file $FILE"
 fi
 
 echo Processing $FILE
