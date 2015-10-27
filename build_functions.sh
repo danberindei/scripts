@@ -7,10 +7,12 @@ function print() {
 function print_and_run() {
   print $*
   CMD=$1 ; shift
-  $CMD ${=*}
-  if [ $? -ne 0 ] ; then
-    return 9
-  fi
+  $CMD ${=*} || ERRCODE=$?
+  if [ $ERRCODE -ne 0 ]; then return $ERRCODE; fi
+}
+
+function output_processor() {
+  perl -ne 'print "\e[A\e[A" if /Test suite progress:/; chomp; print $_; print "\e[K\n"; print "\n\n" if /failed\.|skipped\./'
 }
 
 function big_build_function() {
@@ -112,8 +114,11 @@ function big_build_function() {
 
       if [ $TEST -eq 1 ] ; then
         print MAVEN_FORK_OPTS=$MAVEN_FORK_OPTS
-        print_and_run mvn -e -o verify -Ptest-CI ${=MODULE_ARGS} $MAVEN_LOG_OPTS ${=EXTRA_ARGS}
-        ERRCODE=$?
+        print_and_run mvn -e -nsu surefire:test failsafe:integration-test failsafe:verify -Ptest-CI ${=MODULE_ARGS} ${MAVEN_LOG_OPTS} ${=EXTRA_ARGS} | output_processor
+        #print_and_run mvn -e -nsu verify -Ptest-CI ${=MODULE_ARGS} ${MAVEN_LOG_OPTS} ${=EXTRA_ARGS} | output_processor
+        #print_and_run mvn -e -nsu verify -Ptest-CI ${=MODULE_ARGS} ${=EXTRA_ARGS} | output_processor
+        # output_processor mangles $?
+        echo $ERRCODE $?
         return $ERRCODE
       fi
 }
@@ -129,3 +134,4 @@ case `basename $0` in
   *) 	echo Unrecognized executable name: $0 >&2 ; exit 1
 esac
 
+exit $?
