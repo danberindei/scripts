@@ -1,0 +1,23 @@
+#!/bin/bash
+
+if [ "$1" == "-e" ] ; then
+  message=$2
+  shift 2
+  cmd="$* |& tee >(grep \"$message\" && export failed=true) && [[ \"$failed == false\" ]]"
+else
+  cmd="$*"
+fi
+
+red=$'\e[1;31m'
+reset_color=$'\e[0m'
+
+i=1 
+echo -e "\033]0;Run $i: $cmd\007" 
+while bash -c "$cmd"; do
+  i=$((i + 1)) 
+  echo -e "\033]0;Run $i: $cmd\007\n\n\n$red=== === ===$reset_color\n\n\n" 
+done
+
+echo Failed during run $i
+exit $?
+
