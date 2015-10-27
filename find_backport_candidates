@@ -1,0 +1,3 @@
+#!/bin/zsh
+
+(for COMMIT in ${(f)"$(git log --reverse --oneline --author=Dan jdg-6.4.x..community/master | sed 's/[^ ]* \(.*\)/\1/')"} ; do TC=$(echo $COMMIT | tr -d '\n'); diff -u <(git log jdg-6.4.x --oneline --grep="$TC" | sed 's/^\w* //'18:49:25log master --oneline --grep="$TC" | sed 's/^\w* //') | dwdiff --diff-input -c ; done) | less
