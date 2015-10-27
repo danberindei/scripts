@@ -29,7 +29,7 @@ CURRENT_BRANCH=`git symbolic-ref --short HEAD`
 while [ ! -z $1 ] ; do
   BRANCH=$1
   if [ "$BRANCH" == "$CURRENT_BRANCH" ] ; then
-    $GIT checkout master
+    $GIT checkout $(find_upstream_branch)
   fi
   $GIT branch -D $BRANCH
   $GIT push -q -f $ORIGIN_REPO :${BRANCH}
