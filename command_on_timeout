@@ -1,0 +1,21 @@
+#!/bin/bash
+
+TIMEOUT_CMD=$1 ; shift
+TIMEOUT=$1 ; shift
+CMD="$@" ; shift
+
+$CMD &
+PID=$!
+pstree -sap $PID
+
+#timeout $TIMEOUT wait $PID
+timeout $TIMEOUT strace -qqe '' -p $PID
+ERR=$?
+if [ $ERR == 124 ] ; then
+  # timeout
+  $TIMEOUT_CMD
+fi
+
+pkill -TERM -P $$
+exit $ERR
+
