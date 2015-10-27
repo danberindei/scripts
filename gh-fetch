@@ -8,6 +8,7 @@ import json
 import re
 from pprint import pprint
 
+debug = True
 upstream_repo = check_output(["git", "config", "sync.upstreamRepo"]).strip()
 base_url = 'https://api.github.com/'
 
@@ -17,6 +18,7 @@ if match:
   # PR url
   resource = restkit.Resource(base_url)
   path = '/repos/%s/%s/pulls/%s' % (match.group(1), match.group(2), match.group(3))
+  if debug: print('Reading pull request information from %s' % path)
   response = resource.get(path, headers={'Accept': 'application/json'})
   json = json.loads(response.body_string())
   head_branch = json['head']['label'];
@@ -33,13 +35,13 @@ try:
   #print "remotes %s" % remotes
   remote_exists = repo in remotes
   if not remote_exists:
-    check_call(["git", "remote", "add", repo, "git://github.com/%s/%s.git" % (repo, project)])
+    check_call(["git", "remote", "add", "--no-tags", repo, "git@github.com:%s/%s.git" % (repo, project)])
 
   current_branch = check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
   if current_branch == local_branch:
     check_call(["git", "checkout", "master"])
 
-  check_call(["git", "fetch", "-f", repo, branch + ":" + local_branch])
+  check_call(["git", "fetch", "--no-tags", "-f", repo, branch + ":" + local_branch])
   check_call(["git", "checkout", local_branch])
   release_branch = check_output(['find_upstream_branch']).strip()
   check_call(["git", "fetch", upstream_repo, release_branch + ":" + release_branch])
