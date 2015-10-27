@@ -9,19 +9,17 @@ import re
 from pprint import pprint
 
 base_url = 'https://api.github.com/'
-token = "token $GITHUB_OAUTH_TOKEN"
 
 org = sys.argv[1]
 repo = sys.argv[2]
 pr = sys.argv[3]
-comment = sys.argv[4]
 
 # PR url
 resource = restkit.Resource(base_url)
-path = '/repos/%s/%s/issues/%s/comments' % (org, repo, pr)
-print "Using path %s" % path
-body = json.dumps({'body': comment})
-response = resource.post(path, payload=body, headers={'Accept': 'application/json', 'Authorization': token})
+path = '/repos/%s/%s/pulls/%s' % (org, repo, pr)
+response = resource.get(path, headers={'Accept': 'application/json'})
 json = json.loads(response.body_string())
-print json
+branch_name = json['head']['label']
+
+print "##teamcity[setParameter name='teamcity.build.branch' value='%s']" % branch_name
 
