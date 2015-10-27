@@ -143,7 +143,7 @@ def handle_topics():
       else:
         print "Rebase not necessary for topic branch %s" % branch
 
-      if is_push_needed(branch):
+      if upstream_repo != ORIGIN_REPO and  is_push_needed(branch):
         print "Pushing branch %s to %s" % (branch, ORIGIN_REPO)
         run_git("push -f %s %s" % (ORIGIN_REPO, branch))
       else:
