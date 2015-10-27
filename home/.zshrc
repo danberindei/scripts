@@ -83,8 +83,8 @@ case $TERM in
 esac
 
 
-preexec () {
-    echo -e "\033[1A`date +%H:%M:%S` "
+function preexec () {
+    echo -e "\033[1A\$$fg[blue]`date +%H:%M:%S`$reset_color"
     export LAST_CMD="$1"
     export LAST_CMD_START_TIME=$(date +%s)
     export EXEC_WINDOW_NAME="$(print -Pn "* %~ ${vcs_info_msg_0_}: %n@%m")"
