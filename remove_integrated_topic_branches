@@ -2,30 +2,48 @@
 
 PR_BRANCH_PREFIX=pr_
 TOPIC_BRANCH_PREFIX=$(git config sync.topicBranchPrefix)
+#TOPIC_BRANCH_PREFIX=t_
 RELEASE_BRANCHES=$(git config sync.releaseBranches)
 
-for b in $RELEASE_BRANCHES ; do
-  echo For release branch $b
-  for tb in $(git branch --merged $b | tr -d '* ' | grep "^$TOPIC_BRANCH_PREFIX") ; do
-    echo Removing integrated topic branch $tb merged in $b
-    git checkout -q $b
-    git push origin :$tb
+function git_ls_branches() {
+  git for-each-ref --format='%(refname:short)' "refs/heads/$1*" "refs/heads/$1*/*" "refs/heads/$1*/*/*" "refs/heads/$1*/*/*/*" "refs/heads/$1*/*/*/*/*" "refs/heads/$1*/*/*/*/*/*"
+}
+
+SAVED_BRANCH=$(git name-rev --name-only HEAD)
+
+for tb in $(git_ls_branches $TOPIC_BRANCH_PREFIX) ; do
+  rb=$(find_upstream_branch $tb)
+  git rebase $rb $tb &>/dev/null || git rebase --abort
+  if git merge-base --is-ancestor $tb $rb ; then
+    echo Removing topic branch $tb merged in $rb
+    git checkout -q $rb
+    git branch --set-upstream-to=$rb $tb
     git branch -d $tb
-  done
+    git push origin :$tb
+  #else
+  #  echo Ignoring branch $tb
+  fi
 done
 
-for prb in $(git branch | grep PR_BRANCH_PREFIX | tr -d '*') ; do git checkout -q $prb ; git rebase -q $(find_upstream_branch) &>/dev/null || git rebase --abort ; done
+for tb in $(git_ls_branches $PR_BRANCH_PREFIX) ; do
+  rb=$(find_upstream_branch $tb)
+  git rebase $rb $tb &>/dev/null || git rebase --abort
+  if git merge-base --is-ancestor $tb $rb ; then
+    echo Removing PR review branch $tb merged in $rb
+    git checkout -q $rb
+    git branch --set-upstream-to=$rb $tb
+    git branch -d $tb
+  #else
+  #  echo Ignoring branch $tb
+  fi
+done
+
+
+# for prb in $(git_ls_branches $PR_BRANCH_PREFIX) ; do git checkout -q $prb ; git rebase -q $(find_upstream_branch) &>/dev/null || git rebase --abort ; done
 #git checkout -q master
 git reset
 
-for b in $RELEASE_BRANCHES ; do
-  echo For release branch $b
-  for prb in $(git branch --merged $b | grep pr_ | tr -d '*') ; do
-    echo Removing PR review branch $prb merged in $b
-    git checkout -q $b
-    git branch -d $prb
-  done
-done
-
-echo Topic branches not integrated yet: $(git branch | grep t_ | tr -d '*')
-echo PR branches not integrated yet: $(git branch | grep pr_ | tr -d '*')
+git checkout -q $SAVED_BRANCH
+echo Topic branches not integrated yet: $(git_ls_branches $TOPIC_BRANCH_PREFIX | tr -d '*')
+echo PR branches not integrated yet: $(git_ls_branches $PR_BRANCH_PREFIX | tr -d '*')
+echo Other branches: $(git_ls_branches | grep -v "^\($TOPIC_BRANCH_PREFIX\|$PR_BRANCH_PREFIX\)")
