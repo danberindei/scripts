@@ -16,19 +16,25 @@ for window in $window_ids ; do
     newx=$((x - 2 * screen_width1 + screen_width2))
     echo "Moving window $(wmctrl -l | grep $window) from $x,$y + $w to $newx,$y"
 
-    maximized=false
-    if [ "$w" -eq "$screen_width2" ]; then
-        maximized=true
+    maximized_vert=false
+    if xprop -id $window _NET_WM_STATE | grep _NET_WM_STATE_MAXIMIZED_VERT ; then
+        maximized_vert=true
+        wmctrl -ir $window -b remove,maximized_vert
     fi
 
-    if $maximized; then
-        wmctrl -ir $window -b remove,maximized_vert,maximized_horz
+    maximized_horz=false
+    if xprop -id $window _NET_WM_STATE | grep _NET_WM_STATE_MAXIMIZED_HORZ ; then
+        maximized_horz=true
+        wmctrl -ir $window -b remove,maximized_horz
     fi
- 
+
     wmctrl -ir $window -e 0,$newx,$y,-1,-1
  
-    if $maximized; then
-        wmctrl -ir $window -b add,maximized_vert,maximized_horz
+    if $maximized_vert; then
+        wmctrl -ir $window -b add,maximized_vert
+    fi
+    if $maximized_horz; then
+        wmctrl -ir $window -b add,maximized_horz
     fi
   fi
 done
