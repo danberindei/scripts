@@ -67,7 +67,7 @@ function big_build_function() {
 
     if [ -n "$EXPLICIT_BRANCH" ] ; then
       if [ $CLEAN_BUILD -eq 1 ] ; then
-        print_and_run rm -r $DEST
+        print_and_run rm -rf $DEST
         print_and_run git clone -slb "$BRANCH" . $DEST
       else
         echo Cannot test a custom branch without building and cleaning the directory >&2
@@ -75,7 +75,7 @@ function big_build_function() {
       fi
     else
       print_and_run mkdir -p $DEST
-      print_and_run rsync -av --delete --link-dest=. --exclude '.git' --exclude 'target' --exclude '*.log' . $DEST
+      print_and_run rsync -a --delete --link-dest=. --exclude '.git' --exclude 'target' --exclude '*.log' . $DEST
     fi
 
     print_and_run cd $DEST
