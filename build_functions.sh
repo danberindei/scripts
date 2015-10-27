@@ -34,8 +34,10 @@ function big_build_function() {
     CLEAN_BUILD=$1 ; shift
     BUILD=$1 ; shift
     TEST=$1 ; shift
-    DEBUG=$1 ; shift
-    #echo params: $CLEAN_BUILD $BUILD $TEST $DEBUG
+
+    if [ -z "$MAVEN_DEBUG" ] ; then
+      MAVEN_DEBUG_OPTS=""
+    fi
     MAVEN_OPTS="$MAVEN_TUNING_OPTS $MAVEN_MEMORY_OPTS $MAVEN_JGROUPS_OPTS $EXTRA_BUILD_OPTS"
     #MAVEN_FORK_OPTS="$MAVEN_OPTS $MAVEN_DEBUG_OPTS $EXTRA_TEST_OPTS "
     MAVEN_FORK_OPTS="$MAVEN_OPTS $MAVEN_LOG_OPTS $MAVEN_GC_LOG_OPTS $MAVEN_DEBUG_OPTS $EXTRA_TEST_OPTS"
@@ -109,38 +111,21 @@ function big_build_function() {
       fi
 
       if [ $TEST -eq 1 ] ; then
-        if [ $DEBUG -ne 1 ] ; then
-          MAVEN_DEBUG_OPTS=""
-        fi
         print MAVEN_FORK_OPTS=$MAVEN_FORK_OPTS
         print_and_run mvn -e -o verify -Ptest-CI ${=MODULE_ARGS} $MAVEN_LOG_OPTS ${=EXTRA_ARGS}
         ERRCODE=$?
         return $ERRCODE
       fi
-    #else
-    #  if [ $DEBUG -ne 1 ] ; then
-    #    MAVEN_DEBUG_OPTS=""
-    #  fi
-    #  SKIP_TESTS=
-    #  if [ $TEST -eq 0 ] ; then
-    #    SKIP_TESTS=-DskipTests
-    #  fi
-    #  print MAVEN_FORK_OPTS=$MAVEN_FORK_OPTS
-    #  print_and_run mvn -e -nsu install -Ptest-CI $SKIP_TESTS ${=MODULE_ARGS} $MAVEN_LOG_OPTS ${=EXTRA_ARGS}
-    #  ERRCODE=$?
-    #  return $ERRCODE
-    #fi
 }
 
 print JAVA_HOME=$JAVA_HOME
 
 case `basename $0` in
-  cbuild) 	big_build_function 1 1 0 0 $* ;;
-  jbuild) 	big_build_function 0 1 0 0 $* ;;
-  jtest) 	big_build_function 0 0 1 0 $* ;;
-  btest) 	big_build_function 0 1 1 0 $* ;;
-  cbtest) 	big_build_function 1 1 1 0 $* ;;
-  dtest)        big_build_function 0 0 1 1 $* ;;
-  *) 	echo Unrecognized executable name: $0 >&2
+  cbuild) 	big_build_function 1 1 0 $* ;;
+  jbuild) 	big_build_function 0 1 0 $* ;;
+  jtest) 	big_build_function 0 0 1 $* ;;
+  btest) 	big_build_function 0 1 1 $* ;;
+  cbtest) 	big_build_function 1 1 1 $* ;;
+  *) 	echo Unrecognized executable name: $0 >&2 ; exit 1
 esac
 
