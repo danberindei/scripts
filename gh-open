@@ -16,5 +16,6 @@ BASE_BRANCH=$(find_upstream_branch)
 BASE_REPO=$(git config sync.upstreamRepo)
 REMOTE=$(git config --get remote.origin.url | sed -n 's/^.*:\(.*\)\.git/\1/ p')
 BASE_REMOTE=$(git config --get remote.${BASE_REPO}.url | sed -n 's/^.*github.com[:/]\(.*\)\/.*/\1/ p')
-#xdg-open https://github.com/$REMOTE/tree/$BRANCH
-google-chrome "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
+#google-chrome "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
+#xdg-open "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
+xdg-open "https://github.com/$REMOTE/tree/$BRANCH"
