@@ -1,0 +1,6 @@
+#compdef gh-open
+
+(( $+functions[__git_branch_names] )) || _git
+
+_arguments -w -C -s \
+      '*:branches:__git_branch_names'
