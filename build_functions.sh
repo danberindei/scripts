@@ -15,21 +15,19 @@ function print_and_run() {
 
 function big_build_function() {
     # maven options
-    MAVEN_TUNING_OPTS="-server -XX:+AggressiveOpts -XX:+UseCompressedOops -XX:+UseG1GC"
-    #MAVEN_TUNING_OPTS="-server -XX:+AggressiveOpts -XX:+UseCompressedOops -XX:-UseLargePages -XX:+UseConcMarkSweepGC -XX:+UseParNewGC -XX:NewRatio=4 -Xss500k"
+#    MAVEN_TUNING_OPTS="-server -XX:+AggressiveOpts -XX:+UseCompressedOops -XX:+UseParallelOldGC -XX:NewRatio=3 -XX:+TieredCompilation"
+    MAVEN_TUNING_OPTS="-server -XX:+AggressiveOpts -XX:+UseCompressedOops -XX:+UseG1GC -XX:MaxGCPauseMillis=500 -XX:+TieredCompilation"
     #MAVEN_TUNING_OPTS="-server -XX:+AggressiveOpts -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:+UseParNewGC -XX:NewRatio=4 -XX:-UseLargePages"
     #MAVEN_TUNING_OPTS="-server -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:+UseParNewGC -XX:NewRatio=4"
-    MAVEN_MEMORY_OPTS="-Xmx1024m -XX:MaxPermSize=256m -Xss500k -XX:+HeapDumpOnOutOfMemoryError"
+    MAVEN_MEMORY_OPTS="-Xmx1500m -XX:MaxPermSize=320m -Xss1m -XX:+HeapDumpOnOutOfMemoryError"
     MAVEN_JGROUPS_OPTS="-Djava.net.preferIPv4Stack=true -Djgroups.bind_addr=127.0.0.1"
     # for tests only
-    MAVEN_DEBUG_OPTS="-ea -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=5006"
+    MAVEN_DEBUG_OPTS="-ea -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5006"
     MAVEN_LOG_OPTS="-Dlog4j.configuration=file:/home/dan/Work/infinispan/log4j-trace.xml"
-    #MAVEN_LOG_OPTS="-Dlog4j.configurationFile=file:///home/dan/Work/infinispan/log4j2-trace.xml"
+    MAVEN_LOG_OPTS="-Dlog4j.configurationFile=file:///home/dan/Work/infinispan/log4j2-trace.xml $MAVEN_LOG_OPTS"
+    #MAVEN_GC_LOG_OPTS="-XX:+PrintGCTimeStamps -XX:+PrintGCApplicationStoppedTime -XX:+PrintGCDetails"
 
     #MAVEN_OPTS="$MAVEN_TUNING_OPTS $MAVEN_JGROUPS_OPTS $EXTRA_BUILD_OPTS"
-    MAVEN_OPTS="$MAVEN_TUNING_OPTS $MAVEN_MEMORY_OPTS $MAVEN_JGROUPS_OPTS $EXTRA_BUILD_OPTS"
-
-    MAVEN_FORK_OPTS="$MAVEN_OPTS $MAVEN_DEBUG_OPTS $EXTRA_TEST_OPTS -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -Xloggc:gc.log"
 
     LOGS_DIR=`pwd`/../logs
 
@@ -38,6 +36,9 @@ function big_build_function() {
     TEST=$1 ; shift
     DEBUG=$1 ; shift
     #echo params: $CLEAN_BUILD $BUILD $TEST $DEBUG
+    MAVEN_OPTS="$MAVEN_TUNING_OPTS $MAVEN_MEMORY_OPTS $MAVEN_JGROUPS_OPTS $EXTRA_BUILD_OPTS"
+    #MAVEN_FORK_OPTS="$MAVEN_OPTS $MAVEN_DEBUG_OPTS $EXTRA_TEST_OPTS "
+    MAVEN_FORK_OPTS="$MAVEN_OPTS $MAVEN_LOG_OPTS $MAVEN_GC_LOG_OPTS $MAVEN_DEBUG_OPTS $EXTRA_TEST_OPTS"
 
     # check if the first parameter is a branch name - if yes, checkout that branch instead of copying the working dir
     if [ -n "$1" ] && (git rev-parse --abbrev-ref --verify -q "$1") ; then
