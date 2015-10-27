@@ -1,0 +1,3 @@
+#!/bin/bash
+
+jstack -l $(jps -l | grep surefirebooter | awk '{ print $1; }') >stack_$(date +%H_%M).txt
