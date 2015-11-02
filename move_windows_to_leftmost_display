@@ -1,6 +1,7 @@
 #!/bin/bash
  
-xrandr
+xrandr --output DP2-2 --primary --left-of eDP1
+sleep 1
 
 # screen width (the effective resolution! just set yours here.)
 screen_width1=1920
