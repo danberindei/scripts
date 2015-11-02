@@ -38,6 +38,8 @@ def filter_test_output(input):
 
 
 def big_build_function(CLEAN_BUILD, BUILD, TEST):
+    LOGS_DIR=getcwd() + "/../logs"
+
     # user options
     EXTRA_BUILD_OPTS=environ.get("EXTRA_BUILD_OPTS", "")
     EXTRA_TEST_OPTS=environ.get("EXTRA_TEST_OPTS", "")
@@ -52,13 +54,11 @@ def big_build_function(CLEAN_BUILD, BUILD, TEST):
     # for tests only
     MAVEN_DEBUG_OPTS="-ea -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5006"
     MAVEN_LOG_OPTS="-Dlog4j.configuration=file:/home/dan/Work/infinispan/log4j-trace.xml"
-    MAVEN_LOG_OPTS="-Dlog4j.configurationFile=file:///home/dan/Work/infinispan/log4j2-trace.xml " + MAVEN_LOG_OPTS
+    MAVEN_LOG_OPTS="-Dlog4j.configurationFile=file:///home/dan/Work/infinispan/log4j2-trace.xml -Dinfinispan.log.path=" + LOGS_DIR + " " + MAVEN_LOG_OPTS
     #MAVEN_GC_LOG_OPTS="-XX:+PrintGCTimeStamps -XX:+PrintGCApplicationStoppedTime -XX:+PrintGCDetails"
     MAVEN_GC_LOG_OPTS=""
 
     #MAVEN_OPTS=" ".join((MAVEN_TUNING_OPTS, MAVEN_JGROUPS_OPTS, EXTRA_BUILD_OPTS))
-
-    LOGS_DIR=getcwd() + "/../logs"
 
     if not environ.get("MAVEN_DEBUG"):
       MAVEN_DEBUG_OPTS=""
@@ -119,7 +119,6 @@ def big_build_function(CLEAN_BUILD, BUILD, TEST):
 
     ERRCODE=0
     if CLEAN_BUILD == 1:
-      #CLEAN=clean
       #print_and_run mvn -nsu clean -am ${=MODULE_ARGS}
       print_and_run("mvn -nsu clean %s" % EXTRA_ARGS)
 
@@ -129,15 +128,13 @@ def big_build_function(CLEAN_BUILD, BUILD, TEST):
 
     if TEST == 1:
       print "MAVEN_FORK_OPTS=%s" % MAVEN_FORK_OPTS
-      cmd = "mvn -e -nsu surefire:test failsafe:integration-test failsafe:verify -Ptest-CI %s %s %s" %(MODULE_ARGS, MAVEN_LOG_OPTS, EXTRA_ARGS)
+      #cmd = "mvn -e -o surefire:test failsafe:integration-test failsafe:verify -Ptest-CI %s %s %s" %(MODULE_ARGS, MAVEN_LOG_OPTS, EXTRA_ARGS)
+      cmd = "mvn -e -o verify -Ptest-CI %s %s %s" %(MODULE_ARGS, MAVEN_LOG_OPTS, EXTRA_ARGS)
       pipe = Popen(shlex.split(cmd), stdout = PIPE, stderr = STDOUT)
       filter_test_output(pipe.stdout)
       returncode = pipe.wait()
       if returncode != 0:
         raise CalledProcessError(returncode, cmd)
-
-      #print_and_run mvn -e -nsu verify -Ptest-CI ${=MODULE_ARGS} ${MAVEN_LOG_OPTS} ${=EXTRA_ARGS} | output_processor
-      #print_and_run mvn -e -nsu verify -Ptest-CI ${=MODULE_ARGS} ${=EXTRA_ARGS} | output_processor
 
 
 def main():
