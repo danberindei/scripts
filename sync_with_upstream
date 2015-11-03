@@ -92,13 +92,7 @@ def have_local_changes():
   return output != ""
 
 def is_push_needed(branch):
-  try:
-    branch_sha = run_git("show-ref -s refs/heads/%s" % branch)
-    origin_branch_sha = run_git("show-ref -s refs/remotes/origin/%s" % branch)
-    #print "Local hash is %s, origin hash is %s" % (branch_sha, origin_branch_sha)
-    return branch_sha != origin_branch_sha
-  except:
-    return True
+  return is_rebase_needed("origin/%s" % branch, branch)
 
 def is_rebase_needed(branch, release_branch):
   upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
@@ -125,6 +119,8 @@ def handle_topics():
   b = run_git("for-each-ref --format=%(refname:short) refs/heads/**")
   topic_branches = [tb for tb in b.splitlines() if tb.startswith(topic_branch_prefix)]
   print "Branches are %s " % topic_branches
+
+  base_branches = dict()
   for branch in topic_branches:
     #print "Analysing topic branch %s" % branch
 
@@ -136,19 +132,38 @@ def handle_topics():
         base_branch = relbranch
         min_distance = distance
 
-    if is_rebase_needed(branch, base_branch):
-      print "Rebasing using git rebase %s (%d commits to rebase)" % (base_branch, min_distance)
-      run_git("checkout %s" % branch)
-      run_git("rebase %s" % base_branch)
-    else:
-      print "Rebase not necessary for topic branch %s" % branch
+    for upbranch in topic_branches:
+      distance = int(run_git("rev-list --max-count=%s --count %s..%s" % (min_distance, upbranch, branch)))
+      if distance < min_distance and distance > 0:
+        base_branch = upbranch
+        min_distance = distance
 
-    if upstream_repo != ORIGIN_REPO and  is_push_needed(branch):
-      print "Pushing branch %s to %s" % (branch, ORIGIN_REPO)
-      run_git("push -f %s %s" % (ORIGIN_REPO, branch))
-    else:
-      #print "Push not necessary for topic branch %s" % branch
-      pass
+    base_branches[branch] = base_branch
+
+  # First, topic branches that are based directly on a release branch
+  for branch, base_branch in base_branches.items():
+    if base_branch in branches:
+      rebase_topic_branch(branch, base_branch)
+
+  # Last, topic branches that are based on other topic branches
+  for branch, base_branch in base_branches.items():
+    if not base_branch in branches:
+      rebase_topic_branch(branch, base_branch)
+
+def rebase_topic_branch(branch, base_branch):
+  if is_rebase_needed(branch, base_branch):
+    print "Rebasing using git rebase %s" % base_branch
+    run_git("checkout %s" % branch)
+    run_git("rebase %s" % base_branch)
+  else:
+    print "Rebase not necessary for topic branch %s" % branch
+
+  if upstream_repo != ORIGIN_REPO and  is_push_needed(branch):
+    print "Pushing branch %s to %s" % (branch, ORIGIN_REPO)
+    run_git("push -f %s %s" % (ORIGIN_REPO, branch))
+  else:
+    #print "Push not necessary for topic branch %s" % branch
+    pass
 
 def is_not_empty(n):
  return n != ''
