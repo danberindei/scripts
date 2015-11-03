@@ -21,6 +21,10 @@ DEFAULT_BRANCHES_TO_SYNC=["master", "5.2.x", "5.3.x"] # These need to be on both
 DEFAULT_TOPIC_BRANCH_PREFIX="t_" # All branches whose name starts with this will be rebased against their updated branch point
 GIT="git" # Path to the git binary executable
 
+CONFIG_UPSTREAM_REPO="sync.upstreamRepo"
+CONFIG_RELEASE_BRANCHES="sync.releaseBranches"
+CONFIG_TOPIC_BRANCH_PREFIX="sync.topicBranchPrefix"
+
 #
 ############################################################################
 
@@ -97,9 +101,8 @@ def is_push_needed(branch):
     return True
 
 def is_rebase_needed(branch, release_branch):
-  merge_base_sha = run_git("merge-base %s %s" % (branch, release_branch))
-  release_branch_sha = run_git("rev-parse %s" % release_branch)
-  return merge_base_sha != release_branch_sha
+  upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
+  return upstream_only_commit != ''
  
 def handle_release_branches():
   #print "Release branches are %s" % branches
@@ -119,36 +122,33 @@ def handle_release_branches():
 def handle_topics():
   #print "Release branches are %s" % branches
   ## Now handle topic branches.
-  b = run_git("branch")
-  topic_branches = filter(is_not_empty, b.replace(' ', '').replace('*','').split('\n'))
+  b = run_git("for-each-ref --format=%(refname:short) refs/heads/**")
+  topic_branches = [tb for tb in b.splitlines() if tb.startswith(topic_branch_prefix)]
   print "Branches are %s " % topic_branches
   for branch in topic_branches:
-    if branch.startswith(topic_branch_prefix):
-      #print "Analysing topic branch %s" % branch
-      
-      min_distance = 1000
-      base_branch = ''
-      for relbranch in branches:
-        if not relbranch.startswith(topic_branch_prefix):
-          commits = run_git("--no-pager log --pretty=format:'%%H' -n %d %s..%s" % (min_distance, relbranch, branch))
-          distance = len(commits.split('\n'))
-          if distance < min_distance:
-            base_branch = relbranch
-            min_distance = distance
+    #print "Analysing topic branch %s" % branch
 
-      if is_rebase_needed(branch, base_branch):
-        print "Rebasing using git rebase %s (%d commits to rebase)" % (base_branch, min_distance)
-        run_git("checkout %s" % branch)
-        run_git("rebase %s" % base_branch)
-      else:
-        print "Rebase not necessary for topic branch %s" % branch
+    min_distance = 1000
+    base_branch = ''
+    for relbranch in branches:
+      distance = int(run_git("rev-list --max-count=%s --count %s..%s" % (min_distance, relbranch, branch)))
+      if distance < min_distance:
+        base_branch = relbranch
+        min_distance = distance
 
-      if upstream_repo != ORIGIN_REPO and  is_push_needed(branch):
-        print "Pushing branch %s to %s" % (branch, ORIGIN_REPO)
-        run_git("push -f %s %s" % (ORIGIN_REPO, branch))
-      else:
-        #print "Push not necessary for topic branch %s" % branch
-        pass
+    if is_rebase_needed(branch, base_branch):
+      print "Rebasing using git rebase %s (%d commits to rebase)" % (base_branch, min_distance)
+      run_git("checkout %s" % branch)
+      run_git("rebase %s" % base_branch)
+    else:
+      print "Rebase not necessary for topic branch %s" % branch
+
+    if upstream_repo != ORIGIN_REPO and  is_push_needed(branch):
+      print "Pushing branch %s to %s" % (branch, ORIGIN_REPO)
+      run_git("push -f %s %s" % (ORIGIN_REPO, branch))
+    else:
+      #print "Push not necessary for topic branch %s" % branch
+      pass
 
 def is_not_empty(n):
  return n != ''
@@ -165,16 +165,16 @@ def parse_args():
     print str(err) # will print something like "option -a not recognized"
     sys.exit(2)
 
-  upstream_repo = run_git("config sync.upstreamRepo").strip()
+  upstream_repo = run_git("config %s" % CONFIG_UPSTREAM_REPO).strip()
   if upstream_repo == "":
     upstream_repo = DEFAULT_UPSTREAM_REPO
 
-  branches = run_git("config sync.releaseBranches").split()
+  branches = run_git("config %s" % CONFIG_RELEASE_BRANCHES).split()
   if branches == "":
     branches = DEFAULT_BRANCHES_TO_SYNC
 
   try:
-    topic_branch_prefix = run_git("config sync.topicBranchPrefix").strip()
+    topic_branch_prefix = run_git("config %s" % CONFIG_TOPIC_BRANCH_PREFIX).strip()
   except Exception:
     topic_branch_prefix = DEFAULT_TOPIC_BRANCH_PREFIX
 
