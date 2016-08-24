@@ -24,22 +24,24 @@ def test(cmd):
   return errcode == 0
 
 def filter_test_output(input):
-  regex = re.compile("Tests succeeded:")
-  regex2 = re.compile("Test (starting|succeeded):")
+  regex2 = re.compile("Test (starting|succeeded|failed|skipped):")
+  stats = dict()
+
   line = input.readline()
   while line:
-    if regex.search(line):
+    m = regex2.search(line)
+    if m:
       # write the number of tests in the title
-      #stdout.write("\033]0;%s" % (line))
-      # go to top-left corner: "\033[s\033[1;1H" and back: "\033[u"
-      # go up 1 line
-      stdout.write("\033[A")
-      stdout.write(line.replace("\n", "\033[K\n"))
-    elif regex2.search(line):
-      stdout.write(line.replace("\n", "\033[K\r"))
-    else:
-      stdout.write(line.replace("\n", "\033[K\n"))
+      status = m.group(1)
+      stats[status] = stats.get(status, 0) + 1
+      started = stats.get("starting", 0)
+      succeeded = stats.get("succeeded", 0)
+      failed = stats.get("failed", 0)
+      skipped = stats.get("skipped", 0)
+      running = started - succeeded - failed
+      stderr.write("\033]0;Tests successful: {1}, failed: {2}, skipped: {3}, running: {0}\a".format(running, succeeded, failed, skipped))
 
+    stdout.write(line)
     line = input.readline()
 
 
@@ -141,10 +143,13 @@ def big_build_function(CLEAN_BUILD, BUILD, TEST):
       #cmd = "mvn -e -o surefire:test failsafe:integration-test failsafe:verify -Ptest-CI %s %s %s" %(MODULE_ARGS, MAVEN_LOG_OPTS, EXTRA_ARGS)
       cmd = "mvn -e -o verify -Ptest-CI %s %s %s" %(MODULE_ARGS, MAVEN_LOG_OPTS, EXTRA_ARGS)
       pipe = Popen(shlex.split(cmd), stdout = PIPE, stderr = STDOUT)
-      filter_test_output(pipe.stdout)
-      returncode = pipe.wait()
-      if returncode != 0:
-        raise CalledProcessError(returncode, cmd)
+      try:
+        filter_test_output(pipe.stdout)
+        returncode = pipe.wait()
+        if returncode != 0:
+          raise CalledProcessError(returncode, cmd)
+      finally:
+        pipe.kill()
 
 
 def main():
