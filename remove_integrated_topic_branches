@@ -20,6 +20,9 @@ for tb in $(git_ls_branches $TOPIC_BRANCH_PREFIX) ; do
     git branch --set-upstream-to=$rb $tb
     git branch -d $tb
     git push origin :$tb
+    if [[ "$SAVED_BRANCH" == "$tb" ]]; then
+      SAVED_BRANCH=$rb
+    fi
   #else
   #  echo Ignoring branch $tb
   fi
@@ -33,6 +36,9 @@ for tb in $(git_ls_branches $PR_BRANCH_PREFIX) ; do
     git checkout -q $rb
     git branch --set-upstream-to=$rb $tb
     git branch -d $tb
+    if [[ "$SAVED_BRANCH" == "$tb" ]]; then
+      SAVED_BRANCH=$rb
+    fi
   #else
   #  echo Ignoring branch $tb
   fi
