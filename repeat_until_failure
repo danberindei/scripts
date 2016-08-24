@@ -13,7 +13,7 @@ reset_color=$'\e[0m'
 
 i=1 
 echo -e "\033]0;Run $i: $cmd\007" 
-while bash -c "$cmd"; do
+while $cmd; do
   i=$((i + 1)) 
   echo -e "\033]0;Run $i: $cmd\007\n\n\n$red=== === ===$reset_color\n\n\n" 
 done
