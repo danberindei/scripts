@@ -8,6 +8,7 @@ alias free='free -h'
 alias fpaste='fpaste -n Dan'
 alias yum='dnf'
 
+alias gk='gitk --branches --remotes=origin --remotes=upstream'
 alias grb='git rebase'
 
 ispn=~/Work/infinispan
