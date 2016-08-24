@@ -92,7 +92,10 @@ def have_local_changes():
   return output != ""
 
 def is_push_needed(branch):
-  return is_rebase_needed("origin/%s" % branch, branch)
+  try:
+    return is_rebase_needed("origin/%s" % branch, branch)
+  except Exception:
+    return True
 
 def is_rebase_needed(branch, release_branch):
   upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
@@ -111,7 +114,8 @@ def handle_release_branches():
     if upstream_repo != ORIGIN_REPO and is_push_needed(branch):
       run_git("push -q -f %s %s" % (ORIGIN_REPO, branch))
 
-  run_git("push -q %s --tags" % ORIGIN_REPO)
+  if upstream_repo != ORIGIN_REPO:
+    run_git("push -q %s --tags" % ORIGIN_REPO)
 
 def handle_topics():
   #print "Release branches are %s" % branches
