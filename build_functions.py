@@ -24,7 +24,7 @@ def test(cmd):
   return errcode == 0
 
 def filter_test_output(input):
-  regex2 = re.compile("Test (starting|succeeded|failed|skipped):")
+  regex2 = re.compile("(?:^|\))\[TestSuiteProgress\] Test (starting|succeeded|failed|skipped):")
   stats = dict()
 
   line = input.readline()
@@ -95,9 +95,8 @@ def big_build_function(CLEAN_BUILD, BUILD, TEST):
     PROJECT=path.basename(getcwd())
     print "Running off branch %s" % BRANCH
     UPSTREAM_BRANCH=run("find_upstream_branch %s" % quote(BRANCH))
-    #DEST="/tmp/privatebuild/%s/%s" % (quote(PROJECT), quote(UPSTREAM_BRANCH))
-    DEST="/tmp/privatebuild/%s" % quote(PROJECT)
-    #DEST="../privatebuild/%s" % quote(PROJECT)
+    #DEST="/tmp/privatebuild/%s" % quote(PROJECT)
+    DEST="../tmpbuild/%s" % quote(PROJECT)
 
     if not UPSTREAM_BRANCH:
       exit(1)
@@ -143,13 +142,15 @@ def big_build_function(CLEAN_BUILD, BUILD, TEST):
       #cmd = "mvn -e -o surefire:test failsafe:integration-test failsafe:verify -Ptest-CI %s %s %s" %(MODULE_ARGS, MAVEN_LOG_OPTS, EXTRA_ARGS)
       cmd = "mvn -e -o verify -Ptest-CI %s %s %s" %(MODULE_ARGS, MAVEN_LOG_OPTS, EXTRA_ARGS)
       pipe = Popen(shlex.split(cmd), stdout = PIPE, stderr = STDOUT)
+
       try:
         filter_test_output(pipe.stdout)
         returncode = pipe.wait()
-        if returncode != 0:
-          raise CalledProcessError(returncode, cmd)
-      finally:
-        pipe.kill()
+      except:
+        pipe.terminate()
+
+      if returncode != 0:
+        raise CalledProcessError(returncode, cmd)
 
 
 def main():
