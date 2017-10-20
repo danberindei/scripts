@@ -22,3 +22,8 @@ function java8 {
   JAVA_HOME=$ORACLE_JDK8_HOME
   echo JAVA_HOME=$(readlink $JAVA_HOME)
 }
+
+function java9 {
+  JAVA_HOME=$ORACLE_JDK9_HOME
+  echo JAVA_HOME=$(readlink $JAVA_HOME)
+}
