@@ -32,10 +32,9 @@ fi
 
 DATE=$(date +%Y%m%d)
 for TEST in $FAILED_TESTS ; do
-  SHORTNAME=`perl -e '$t = $ARGV[0]; chomp $t; $t =~ s/[-a-z]//g; print $t;' $TEST`
-  #LOWSHORTNAME=`perl -e 'print lc $ARGV[0];' $SHORTNAME`
   TESTFILE=$(echo ${TEST}${BRANCH}_${DATE}.log | tr / _)
   TESTFILE=${TESTFILE//[^a-zA-Z0-9-_.]/}
   echo "Writing $TEST log to $TESTFILE"
-  $CAT $FILE | $DIR/greplog.py "\(.*\b$TEST\b.*\) \[" | perl -npe "s/$TEST(\\{.*?\\})?(?!\.java)/$SHORTNAME/g" > $TESTFILE
+  #$CAT $FILE | $DIR/greplog.py "\(.*\b$TEST\b.*\) \[" | perl -npe "s/$TEST(\\[.*?\\])?(?!\.)/Test/g" > $TESTFILE
+  $CAT $FILE | $DIR/greplog.py "\b$TEST\b" | perl -npe "s/$TEST(\\[.*?\\])?(?!\.)/Test/g" > $TESTFILE
 done
