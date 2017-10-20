@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -e
+
 if [ -n "$1" ] ; then
   REV=$1
   shift
@@ -16,6 +18,11 @@ BASE_BRANCH=$(find_upstream_branch)
 BASE_REPO=$(git config sync.upstreamRepo)
 REMOTE=$(git config --get remote.origin.url | sed -n 's/^.*:\(.*\)\.git/\1/ p')
 BASE_REMOTE=$(git config --get remote.${BASE_REPO}.url | sed -n 's/^.*github.com[:/]\(.*\)\/.*/\1/ p')
-#google-chrome "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
-#xdg-open "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
-xdg-open "https://github.com/$REMOTE/tree/$BRANCH"
+
+if [ "$BASE_REMOTE" != "origin" ] ; then
+  #google-chrome "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
+  firefox "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
+else
+  #google-chrome "https://github.com/$REMOTE/compare/$BASE_BRANCH...$BRANCH"
+  firefox "https://github.com/$REMOTE/compare/$BASE_BRANCH...$BRANCH"
+fi
