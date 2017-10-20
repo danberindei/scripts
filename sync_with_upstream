@@ -51,6 +51,7 @@ if "check_output" not in dir( subprocess ): # duck punch it in!
     subprocess.check_output = f
 
 isdebug = False
+push_to_origin = False
 upstream_repo = None
 branches = None
 topic_branch_prefix = None
@@ -71,7 +72,7 @@ def init():
   # Cache current branch to be able to get it back to it after done
   #checked_out_branch = run_git("symbolic-ref --short HEAD").split('\n')[0]
   checked_out_branch = run_git("symbolic-ref HEAD").replace("refs/heads/", "").split('\n')[0]
-  
+
   if not os.path.isdir(".git"):
     print "This script MUST be run in the local clone of your forked repo!"
     sys.exit(1)
@@ -92,6 +93,9 @@ def have_local_changes():
   return output != ""
 
 def is_push_needed(branch):
+  if not push_to_origin:
+    return False
+
   try:
     return is_rebase_needed("origin/%s" % branch, branch)
   except Exception:
@@ -100,7 +104,7 @@ def is_push_needed(branch):
 def is_rebase_needed(branch, release_branch):
   upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
   return upstream_only_commit != ''
- 
+
 def handle_release_branches():
   #print "Release branches are %s" % branches
   for branch in branches:
@@ -109,7 +113,8 @@ def handle_release_branches():
       run_git("checkout -q %s" % branch)
       run_git("rebase -q %s/%s" % (upstream_repo, branch))
     else:
-      print "Branch %s hasn't changed upstream" % branch
+      #print "Branch %s hasn't changed upstream" % branch
+      pass
 
     if upstream_repo != ORIGIN_REPO and is_push_needed(branch):
       run_git("push -q -f %s %s" % (ORIGIN_REPO, branch))
@@ -128,19 +133,27 @@ def handle_topics():
   for branch in topic_branches:
     #print "Analysing topic branch %s" % branch
 
-    min_distance = 1000
-    base_branch = ''
-    for relbranch in branches:
-      distance = int(run_git("rev-list --max-count=%s --count %s..%s" % (min_distance, relbranch, branch)))
-      if distance < min_distance:
-        base_branch = relbranch
-        min_distance = distance
+    # read the upstream branch from config
+    try:
+      base_branch = run_git("config branch.%s.merge" % (branch)).strip()
+      distance = int(run_git("rev-list --max-count=%s --count %s..%s" % (min_distance, base_branch, branch)))
+    except:
+      base_branch = ""
+    if base_branch == "":
+      min_distance = 500
+      for relbranch in branches:
+        distance = int(run_git("rev-list --max-count=%s --count %s..%s" % (min_distance, relbranch, branch)))
+        if distance < min_distance:
+          base_branch = relbranch
+          min_distance = distance
 
-    for upbranch in topic_branches:
-      distance = int(run_git("rev-list --max-count=%s --count %s..%s" % (min_distance, upbranch, branch)))
-      if distance < min_distance and distance > 0:
-        base_branch = upbranch
-        min_distance = distance
+      for upbranch in topic_branches:
+        distance = int(run_git("rev-list --max-count=%s --count %s..%s" % (min_distance, upbranch, branch)))
+        if distance < min_distance and distance > 0:
+          base_branch = upbranch
+          min_distance = distance
+
+      run_git("branch --set-upstream-to=%s %s" % (base_branch, branch))
 
     base_branches[branch] = base_branch
 
@@ -149,24 +162,33 @@ def handle_topics():
     if base_branch in branches:
       rebase_topic_branch(branch, base_branch)
 
-  # Last, topic branches that are based on other topic branches
+  # Then topic branches that are based on other topic branches
   for branch, base_branch in base_branches.items():
     if not base_branch in branches:
       rebase_topic_branch(branch, base_branch)
 
+  # Finally, push the modified branches to origin
+  for branch in topic_branches:
+    push_topic_branch(branch)
+
 def rebase_topic_branch(branch, base_branch):
   if is_rebase_needed(branch, base_branch):
-    print "Rebasing using git rebase %s" % base_branch
+    print "Rebasing topic branch %s on top of %s" % (branch, base_branch)
     run_git("checkout %s" % branch)
     run_git("rebase %s" % base_branch)
   else:
-    print "Rebase not necessary for topic branch %s" % branch
+    #print "Rebase not necessary for topic branch %s" % branch
+    pass
 
-  if upstream_repo != ORIGIN_REPO and  is_push_needed(branch):
+def push_topic_branch(branch):
+  if upstream_repo != ORIGIN_REPO and is_push_needed(branch):
     print "Pushing branch %s to %s" % (branch, ORIGIN_REPO)
-    run_git("push -f %s %s" % (ORIGIN_REPO, branch))
+    try:
+      # This will fail if the remote branch doesn't exist yet
+      run_git("push -q --force-with-lease %s %s" % (ORIGIN_REPO, branch))
+    except Exception:
+      run_git("push -q %s %s" % (ORIGIN_REPO, branch))
   else:
-    #print "Push not necessary for topic branch %s" % branch
     pass
 
 def is_not_empty(n):
@@ -176,9 +198,10 @@ def parse_args():
   global upstream_repo
   global branches
   global isdebug
+  global push_to_origin
   global topic_branch_prefix
   try:
-    opts, args = getopt.getopt(sys.argv[1:], "hdu:b:", ["help", "debug", "upstream_repo=", "branches="])
+    opts, args = getopt.getopt(sys.argv[1:], "hdpu:b:", ["help", "debug", "push", "upstream=", "branches="])
   except getopt.GetoptError, err:
     # print help information and exit:
     print str(err) # will print something like "option -a not recognized"
@@ -198,7 +221,9 @@ def parse_args():
     topic_branch_prefix = DEFAULT_TOPIC_BRANCH_PREFIX
 
   for o, a in opts:
-    if o in ("-u", "--upstream_repo"):
+    if o in ("-p", "--push"):
+      push_to_origin = True
+    elif o in ("-u", "--upstream"):
       upstream_repo = a
       print "Upstream repo %s" % upstream_repo
     elif o in ("-b", "--branches"):
@@ -213,13 +238,13 @@ def parse_args():
       assert False, "unhandled option"
 
 def usage():
-  print "usage: ", sys.argv[0],"[-u <upstream repo>] [-b <comma separated branches>]"
+  print "usage: ", sys.argv[0],"[-u <upstream repo>] [-b <comma separated branches>] [-p]"
 
 def main():
   parse_args()
   init()
   handle_release_branches()
-  print "Local clone and %s synced with %s" % (ORIGIN_REPO, upstream_repo)
+  print "Local release branches %s synced with %s" % (branches, upstream_repo)
   print "Now rebasing all topic branches that start with '%s'" % topic_branch_prefix
   handle_topics()
   finish()
