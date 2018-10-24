@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #Alpha
-for f in danberindei*.pdf ; do
+for f in ?????????????.pdf ; do
   NEW_NAME="$(pdftotext "$f" - | perl ~/bin/alpha_statement_name.pl)"
   if [ ${#NEW_NAME} -gt 5 ] ; then
     if [ ! -e "${NEW_NAME}.pdf" ] ; then
