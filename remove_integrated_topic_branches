@@ -3,6 +3,7 @@
 set -e
 
 PR_BRANCH_PREFIX=pr_
+UPSTREAM=$(git config sync.upstreamRepo || true)
 TOPIC_BRANCH_PREFIX=$(git config sync.topicBranchPrefix || true)
 #TOPIC_BRANCH_PREFIX=t_
 RELEASE_BRANCHES=$(git config sync.releaseBranches || true)
@@ -26,34 +27,38 @@ SAVED_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
 for tb in $(git_ls_branches $TOPIC_BRANCH_PREFIX) ; do
   rb=$(find_upstream_branch $tb)
-  git rebase $rb $tb &>/dev/null || git rebase --abort
-  if git merge-base --is-ancestor $tb $rb ; then
-    echo Removing topic branch $tb merged in $rb
-    git checkout -q $rb
-    git branch --set-upstream-to=$rb $tb
-    git branch -d $tb
-    git push origin :$tb
-    if [[ "$SAVED_BRANCH" == "$tb" ]]; then
-      SAVED_BRANCH=$rb
+  # Checkout could fail because the branch is checked out in another worktree
+  if git switch -q $tb ; then
+    # The rebase could fail because it has conflicts
+    git rebase $rb $tb &>/dev/null || git rebase --abort
+    if git merge-base --is-ancestor $tb $rb ; then
+      echo Removing topic branch $tb merged in $rb
+      git checkout -q $rb
+      git branch --set-upstream-to=$rb $tb
+      git branch -d $tb
+      git push origin :$tb
+      if [[ "$SAVED_BRANCH" == "$tb" ]]; then
+        SAVED_BRANCH=$rb
+      fi
     fi
-  #else
-  #  echo Ignoring branch $tb
   fi
 done
 
 for tb in $(git_ls_branches $PR_BRANCH_PREFIX) ; do
   rb=$(find_upstream_branch $tb)
-  git rebase $rb $tb &>/dev/null || git rebase --abort
-  if git merge-base --is-ancestor $tb $rb ; then
-    echo Removing PR review branch $tb merged in $rb
-    git checkout -q $rb
-    git branch --set-upstream-to=$rb $tb
-    git branch -d $tb
-    if [[ "$SAVED_BRANCH" == "$tb" ]]; then
-      SAVED_BRANCH=$rb
+  # Checkout could fail because the branch is checked out in another worktree
+  if git switch -q $tb ; then
+    # The rebase could fail because it has conflicts
+    git rebase $rb $tb &>/dev/null || git rebase --abort
+    if git merge-base --is-ancestor $tb $rb ; then
+      echo Removing PR review branch $tb merged in $rb
+      git checkout -q $rb
+      git branch --set-upstream-to=$UPSTREAM/$rb $tb
+      git branch -d $tb
+      if [[ "$SAVED_BRANCH" == "$tb" ]]; then
+        SAVED_BRANCH=$rb
+      fi
     fi
-  #else
-  #  echo Ignoring branch $tb
   fi
 done
 
@@ -63,6 +68,11 @@ done
 git reset
 
 git checkout -q $SAVED_BRANCH
-echo Topic branches not integrated yet: $(git_ls_branches $TOPIC_BRANCH_PREFIX | tr -d '*')
-echo PR branches not integrated yet: $(git_ls_branches $PR_BRANCH_PREFIX | tr -d '*')
-echo Other branches: $(git_ls_branches | grep -v "^\($TOPIC_BRANCH_PREFIX\|$PR_BRANCH_PREFIX\)")
+echo Topic branches not integrated yet:
+echo $(git_ls_branches $TOPIC_BRANCH_PREFIX | tr -d '*')
+echo
+echo PR branches not integrated yet:
+echo $(git_ls_branches $PR_BRANCH_PREFIX | tr -d '*')
+echo
+echo Other branches:
+echo $(git_ls_branches | grep -v "^\($TOPIC_BRANCH_PREFIX\|$PR_BRANCH_PREFIX\)")

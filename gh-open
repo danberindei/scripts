@@ -21,8 +21,8 @@ BASE_REMOTE=$(git config --get remote.${BASE_REPO}.url | sed -n 's/^.*github.com
 
 if [ "$BASE_REMOTE" != "origin" ] ; then
   #google-chrome "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
-  firefox "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
+  xdg-open "https://github.com/$REMOTE/compare/$BASE_REMOTE:$BASE_BRANCH...$BRANCH"
 else
   #google-chrome "https://github.com/$REMOTE/compare/$BASE_BRANCH...$BRANCH"
-  firefox "https://github.com/$REMOTE/compare/$BASE_BRANCH...$BRANCH"
+  xdg-open "https://github.com/$REMOTE/compare/$BASE_BRANCH...$BRANCH"
 fi

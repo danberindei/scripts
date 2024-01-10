@@ -12,7 +12,6 @@
 ############################################################################
 
 
-from __future__ import print_function
 import os
 from os import path
 import sys
@@ -38,7 +37,7 @@ def run_git(opts):
   for o in opts.split(' '):
     if o != '':
       call.append(o)
-  return subprocess.check_output(call)
+  return subprocess.run(call, capture_output=True, text=True).stdout
 
 def find_upstream_repo():
   try:
@@ -64,7 +63,7 @@ def parse_args():
 
   try:
     opts, args = getopt.getopt(sys.argv[1:], "hu:b:", ["help", "upstream_repo=", "rel_branches="])
-  except getopt.GetoptError, err:
+  except getopt.GetoptError as err:
     # print help information and exit:
     print(str(err), file=sys.stderr) # will print something like "option -a not recognized"
     sys.exit(2)

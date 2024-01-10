@@ -5,11 +5,12 @@ alias jps='jps -l'
 alias du='du -h'
 alias df='df -h'
 alias free='free -h'
-alias fpaste='fpaste -n Dan'
-alias yum='dnf'
 
 alias gk='gitk --branches --remotes=origin --remotes=upstream'
 alias grb='git rebase'
+alias gpo='git please origin'
+
+#alias docker='podman'
 
 ispn=~/Work/infinispan
 logs=~/Work/logs
@@ -18,3 +19,4 @@ rgdist=~radargun/target/distribution/RadarGun-*-SNAPSHOT
 jgroups=~/Work/JGroups
 jdg=~/Work/jdg
 wiki=~/Work/infinispan.wiki
+tmpbuild=~/Work/tmpbuild

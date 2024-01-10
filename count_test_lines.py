@@ -7,7 +7,7 @@ tests = dict()
 orphan_threads = dict()
 previous_test = None
 previous_orphan = None
-pattern = re.compile("\(testng-([A-Za-z0-9]+)")
+pattern = re.compile("\(testng-([A-Za-z0-9.]+)")
 
 for line in fileinput.input():
   m = pattern.search(line)
@@ -15,10 +15,10 @@ for line in fileinput.input():
     test_name = m.group(1)
     if test_name not in tests:
       tests[test_name] = 0
-      #print "New test: %s" % test_name
+      #print("New test: %s" % test_name)
 
   test_matched = False
-  for test_name in tests.iterkeys():
+  for test_name in tests.keys():
     if test_name in line:
       tests[test_name] += 1
       test_matched = True
@@ -47,9 +47,10 @@ for line in fileinput.input():
     orphan_threads[previous_orphan] += 1
 
 
-for (test_name, count) in tests.iteritems():
-  print "%7d %s" % (count, test_name)
+for test_name in sorted(tests, key=tests.__getitem__):
+  count = tests[test_name]
+  print("%7d %s" % (count, test_name))
 
-for (orphan_thread_name, count) in orphan_threads.iteritems():
-  print "%7d orphan %s" % (count, orphan_thread_name)
+for (orphan_thread_name, count) in orphan_threads.items():
+  print("%7d orphan %s" % (count, orphan_thread_name))
 

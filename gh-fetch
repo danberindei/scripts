@@ -19,9 +19,9 @@ if match:
   resource = restkit.Resource(base_url)
   path = '/repos/%s/%s/pulls/%s' % (match.group(1), match.group(2), match.group(3))
   if debug: print('Reading pull request information from %s' % path)
-  response = resource.get(path, headers={'Accept': 'application/json'})
+  response = resource.get(path, headers={'Accept': 'application/json', 'Authorization': 'token ' + os.environ['GITHUB_OAUTH_TOKEN']})
   json = json.loads(response.body_string())
-  head_branch = json['head']['label'];
+  head_branch = json['head']['label']
 else:
   # repo:branch
   head_branch = pr
@@ -41,11 +41,13 @@ try:
   if current_branch == local_branch:
     check_call(["git", "checkout", "master"])
 
-  check_call(["git", "fetch", "--no-tags", "-f", repo, branch + ":" + local_branch])
+  print("git fetch --no-tags -f %s %s:%s" % (repo, branch, local_branch))
+  check_call(["git", "fetch", "--no-tags", "-f", "-q", repo, branch + ":" + local_branch])
   check_call(["git", "checkout", local_branch])
   release_branch = check_output(['find_upstream_branch']).strip()
   check_call(["git", "fetch", upstream_repo, release_branch + ":" + release_branch])
   check_call(["git", "branch", "-u", release_branch])
   check_call(["git", "rebase", "-f", release_branch])
 except CalledProcessError as e:
-  print e
+  print(e)
+
