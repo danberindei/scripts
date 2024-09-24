@@ -36,7 +36,7 @@ import getopt
 isdebug = False
 push_to_origin = False
 upstream_repo = None
-branches = None
+release_branches = None
 topic_branch_prefix = None
 checked_out_branch = None
 
@@ -90,27 +90,27 @@ def is_rebase_needed(branch, release_branch):
 
 def handle_release_branches():
   #print("Release branches are %s" % branches)
-  for branch in branches:
-    if is_rebase_needed(branch, upstream_repo + "/" + branch):
-      print("Synchronizing release branch %s" % branch)
-      run_git("checkout --ignore-other-worktrees -q %s" % branch)
+  for relbranch in release_branches:
+    if is_rebase_needed(relbranch, upstream_repo + "/" + relbranch):
+      print("Synchronizing release branch %s" % relbranch)
+      run_git("checkout --ignore-other-worktrees -q %s" % relbranch)
       try:
-        run_git("rebase -q %s/%s" % (upstream_repo, branch))
+        run_git("rebase -q %s/%s" % (upstream_repo, relbranch))
       except:
-        print("Rebase on upstream failed for %s" % branch)
+        print("Rebase on upstream failed for %s" % relbranch)
         sys.exit(3)
     else:
       #print("Branch %s hasn't changed upstream" % branch)
       pass
 
-    if upstream_repo != ORIGIN_REPO and is_push_needed(branch):
-      run_git("push -q -f %s %s" % (ORIGIN_REPO, branch))
+    if upstream_repo != ORIGIN_REPO:
+      run_git("push -q -f %s %s" % (ORIGIN_REPO, relbranch))
 
   if upstream_repo != ORIGIN_REPO:
     run_git("push -q %s --tags" % ORIGIN_REPO)
 
 def handle_topics():
-  print("Release branches are %s" % branches)
+  print("Release branches are %s" % release_branches)
   ## Now handle topic branches.
   b = run_git("for-each-ref --format=%(refname:short) refs/heads/**")
   topic_branches = [tb for tb in b.splitlines() if tb.startswith(topic_branch_prefix)]
@@ -136,7 +136,7 @@ def handle_topics():
 
     min_branch = base_branch
     min_distance = base_distance
-    for relbranch in branches:
+    for relbranch in release_branches:
       distance = int(run_git("rev-list --max-count=%s --count %s..%s" % (min_distance, relbranch, topic_branch)))
       # if isdebug: print("Possible base branch %s, distance is %s" % (relbranch, distance))
       if distance < min_distance:
@@ -145,35 +145,25 @@ def handle_topics():
       if distance == 0:
         break
 
-    for upbranch in topic_branches:
-       if upbranch == topic_branch:
-         continue
-
-       distance = int(run_git("rev-list --max-count=%s --count %s...%s" % (min_distance, upbranch, topic_branch)))
-       # if isdebug: print("Possible upstream branch %s, distance is %s" % (upbranch, distance))
-       if distance < min_distance and distance > 0:
-         min_branch = upbranch
-         min_distance = distance
-
     if min_distance < base_distance:
       if base_branch == '':
         print("Set upstream branch for %s: %s, distance is %s" % (topic_branch, min_branch, min_distance))
         run_git("branch --set-upstream-to=%s %s" % (min_branch, topic_branch))
       else:
         print("Found better upstream branch for %s: %s, distance is %s, base branch %s, base distance %d" % (topic_branch, min_branch, min_distance, base_branch, base_distance))
-    elif not (base_branch in branches):
+    elif not (base_branch in release_branches):
       print("Using branch %s as base of branch %s" % (min_branch, topic_branch))
 
     base_branches[topic_branch] = min_branch
 
   # First, topic branches that are based directly on a release branch
   for branch, base_branch in base_branches.items():
-    if base_branch in branches:
+    if base_branch in release_branches:
       rebase_topic_branch(branch, base_branch)
 
   # Then topic branches that are based on other topic branches
   for branch, base_branch in base_branches.items():
-    if not base_branch in branches:
+    if not base_branch in release_branches:
       rebase_topic_branch(branch, base_branch)
 
   # Finally, push the modified branches to origin
@@ -210,7 +200,7 @@ def is_not_empty(n):
 
 def parse_args():
   global upstream_repo
-  global branches
+  global release_branches
   global isdebug
   global push_to_origin
   global topic_branch_prefix
@@ -225,8 +215,8 @@ def parse_args():
   if upstream_repo == "":
     upstream_repo = DEFAULT_UPSTREAM_REPO
 
-  branches = run_git("config %s" % CONFIG_RELEASE_BRANCHES).split()
-  if branches == "":
+  release_branches = run_git("config %s" % CONFIG_RELEASE_BRANCHES).split()
+  if release_branches == "":
     print("Please configure release branches with %s" % CONFIG_RELEASE_BRANCHES)
 
   try:
@@ -237,12 +227,6 @@ def parse_args():
   for o, a in opts:
     if o in ("-p", "--push"):
       push_to_origin = True
-    elif o in ("-u", "--upstream"):
-      upstream_repo = a
-      print("Upstream repo %s" % upstream_repo)
-    elif o in ("-b", "--branches"):
-      branches = a.split(',')
-      print("Branches to sync up %s" % branches)
     elif o in ("-h", "--help"):
       usage()
       sys.exit()
@@ -258,7 +242,7 @@ def main():
   parse_args()
   init()
   handle_release_branches()
-  print("Local release branches %s synced with %s" % (branches, upstream_repo))
+  print("Local release branches %s synced with %s" % (release_branches, upstream_repo))
   print("Now rebasing all topic branches that start with '%s'" % topic_branch_prefix)
   handle_topics()
   finish()
