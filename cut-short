@@ -1,0 +1,11 @@
+#!/usr/bin/env perl
+
+my $max = 300;
+
+while(<>) {
+  if (length($_) < $max) {
+    print
+  } else { 
+    print substr($_, 0, $max/2) . " ... " . substr($_, -$max/2)
+  }
+}
