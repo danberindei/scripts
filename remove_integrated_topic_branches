@@ -24,6 +24,9 @@ fi
 
 
 SAVED_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ -n"$(git status --porcelain --untracked-files=no)" ]]; then
+	git stash save "remove_integrated_topic_branches backup"
+fi
 
 for tb in $(git_ls_branches $TOPIC_BRANCH_PREFIX) ; do
   rb=$(find_upstream_branch $tb)
@@ -36,7 +39,7 @@ for tb in $(git_ls_branches $TOPIC_BRANCH_PREFIX) ; do
       git checkout -q $rb
       git branch --set-upstream-to=$rb $tb
       git branch -d $tb
-      git push origin :$tb
+      git push origin :$tb || true
       if [[ "$SAVED_BRANCH" == "$tb" ]]; then
         SAVED_BRANCH=$rb
       fi
@@ -66,8 +69,13 @@ done
 # for prb in $(git_ls_branches $PR_BRANCH_PREFIX) ; do git checkout -q $prb ; git rebase -q $(find_upstream_branch) &>/dev/null || git rebase --abort ; done
 #git checkout -q master
 git reset
-
 git checkout -q $SAVED_BRANCH
+
+if git stash list --format="%s" | grep -q "remove_integrated_topic_branches backup"; then
+	git stash pop
+fi
+
+
 echo Topic branches not integrated yet:
 echo $(git_ls_branches $TOPIC_BRANCH_PREFIX | tr -d '*')
 echo
