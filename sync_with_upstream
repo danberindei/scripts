@@ -23,6 +23,7 @@ GIT="git" # Path to the git binary executable
 CONFIG_UPSTREAM_REPO="sync.upstreamRepo"
 CONFIG_RELEASE_BRANCHES="sync.releaseBranches"
 CONFIG_TOPIC_BRANCH_PREFIX="sync.topicBranchPrefix"
+CONFIG_MIRROR_MASTER_TO_MAIN="sync.mirrorMasterToMain"
 
 #
 ############################################################################
@@ -100,6 +101,13 @@ def is_push_needed(branch):
 def is_rebase_needed(branch, release_branch):
   upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
   return upstream_only_commit != ''
+
+def mirror_master_to_main():
+  should_mirror = run_git("config %s" % CONFIG_MIRROR_MASTER_TO_MAIN).strip()
+  if should_mirror == "true":
+    print("Synchronizing master to main")
+    run_git("checkout --ignore-other-worktrees -q main")
+    run_git("reset --hard master")
 
 def handle_release_branches():
   #print("Release branches are %s" % branches)
@@ -256,6 +264,7 @@ def main():
   parse_args()
   init()
   handle_release_branches()
+  mirror_master_to_main()
   print("Local release branches %s synced with %s" % (release_branches, upstream_repo))
   print("Now rebasing all topic branches that start with '%s'" % topic_branch_prefix)
   handle_topics()
