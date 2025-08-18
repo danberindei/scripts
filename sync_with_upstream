@@ -103,7 +103,7 @@ def is_rebase_needed(branch, release_branch):
   return upstream_only_commit != ''
 
 def mirror_master_to_main():
-  should_mirror = run_git("config %s" % CONFIG_MIRROR_MASTER_TO_MAIN).strip()
+  should_mirror = run_git("config get --default=false %s" % CONFIG_MIRROR_MASTER_TO_MAIN).strip()
   if should_mirror == "true":
     print("Synchronizing master to main")
     run_git("checkout --ignore-other-worktrees -q main")
@@ -167,9 +167,9 @@ def handle_topics():
     if min_distance < base_distance:
       if base_branch == '':
         print("Set upstream branch for %s: %s, distance is %s" % (topic_branch, min_branch, min_distance))
-        run_git(f"config branch.{topic_branch}.pushRemote {ORIGIN_REPO}")
-        run_git(f"config branch.{topic_branch}.remote {upstream_repo}")
-        run_git(f"config branch.{topic_branch}.merge refs/heads/{min_branch}")
+        run_git(f"config get branch.{topic_branch}.pushRemote {ORIGIN_REPO}")
+        run_git(f"config get branch.{topic_branch}.remote {upstream_repo}")
+        run_git(f"config get branch.{topic_branch}.merge refs/heads/{min_branch}")
         run_git("branch --set-upstream-to=%s %s" % (min_branch, topic_branch))
       else:
         print("Found better upstream branch for %s: %s, distance is %s, base branch %s, base distance %d" % (topic_branch, min_branch, min_distance, base_branch, base_distance))
@@ -233,16 +233,16 @@ def parse_args():
     print(str(err)) # will print something like "option -a not recognized"
     sys.exit(2)
 
-  upstream_repo = run_git("config %s" % CONFIG_UPSTREAM_REPO).strip()
+  upstream_repo = run_git(f"config get --default={DEFAULT_UPSTREAM_REPO} {CONFIG_UPSTREAM_REPO}").strip()
   if upstream_repo == "":
     upstream_repo = DEFAULT_UPSTREAM_REPO
 
-  release_branches = run_git("config %s" % CONFIG_RELEASE_BRANCHES).split()
+  release_branches = run_git("config get %s" % CONFIG_RELEASE_BRANCHES).split()
   if release_branches == "":
     print("Please configure release branches with %s" % CONFIG_RELEASE_BRANCHES)
 
   try:
-    topic_branch_prefix = run_git("config %s" % CONFIG_TOPIC_BRANCH_PREFIX).strip()
+    topic_branch_prefix = run_git("config get %s" % CONFIG_TOPIC_BRANCH_PREFIX).strip()
   except Exception:
     topic_branch_prefix = DEFAULT_TOPIC_BRANCH_PREFIX
 
