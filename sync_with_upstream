@@ -167,9 +167,9 @@ def handle_topics():
     if min_distance < base_distance:
       if base_branch == '':
         print("Set upstream branch for %s: %s, distance is %s" % (topic_branch, min_branch, min_distance))
-        run_git(f"config get branch.{topic_branch}.pushRemote {ORIGIN_REPO}")
-        run_git(f"config get branch.{topic_branch}.remote {upstream_repo}")
-        run_git(f"config get branch.{topic_branch}.merge refs/heads/{min_branch}")
+        run_git(f"config set branch.{topic_branch}.pushRemote {ORIGIN_REPO}")
+        run_git(f"config set branch.{topic_branch}.remote {upstream_repo}")
+        run_git(f"config set branch.{topic_branch}.merge refs/heads/{min_branch}")
         run_git("branch --set-upstream-to=%s %s" % (min_branch, topic_branch))
       else:
         print("Found better upstream branch for %s: %s, distance is %s, base branch %s, base distance %d" % (topic_branch, min_branch, min_distance, base_branch, base_distance))
