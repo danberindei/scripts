@@ -8,5 +8,5 @@ while (<>) {
   if (/din \d{2}\/(\d{2})\/(\d{4})/) { $luna = $1 ; $an = $2; };
   if (/Cod IBAN: (.*)/) { $iban = $1; };
 }
-END { print "${valuta}_${iban}_${an}-${luna}\n"; }
+END { print "BT_${valuta}_${iban}_${an}-${luna}\n"; }
 
