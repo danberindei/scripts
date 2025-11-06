@@ -103,6 +103,22 @@ def collect_cgroup_data():
                 if comm:
                     exes.add(comm)
 
+            # Collect per-process memory totals for this cgroup
+            processes = []
+            for pid in pids:
+                cmdline = get_proc_cmdline(pid) or get_proc_comm(pid) or ''
+                mem = get_proc_memory(pid)
+                total = mem['rss_bytes'] + mem['swap_bytes'] + mem['shmem_bytes']
+                processes.append({
+                    'pid': pid,
+                    'cmdline': cmdline,
+                    **mem,
+                    'total_bytes': total
+                })
+
+            # Sort processes by total memory usage descending
+            processes.sort(key=lambda x: x['total_bytes'], reverse=True)
+
             service_name = cgroup_dir.name[:40]
 
             results.append({
@@ -112,6 +128,7 @@ def collect_cgroup_data():
                 'root_pid': root_pid,
                 'service': service_name,
                 'executables': sorted(exes),
+                'processes': processes,
                 'cgroup_path': str(cgroup_dir),
                 'pids': pids
             })
@@ -145,13 +162,13 @@ def print_cgroups_table(data):
     max_pid_width = max(len(str(row['root_pid'])) for row in data)
 
     # Print header
-    print(f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables'}")
+    print(f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables(Mem)'}")
     if is_tty:
         print("-" * terminal_width)
     else:
         print("-" * 100)
 
-    # Calculate fixed width for clipping
+    # Calculate fixed width for clipping. Executables column will include per-executable memory totals.
     fixed_width = 9 + 1 + 9 + 1 + 9 + 1 + 9 + 1 + max_pid_width + 1 + 40 + 1
     if is_tty:
         exes_width = max(20, terminal_width - fixed_width)
@@ -166,12 +183,45 @@ def print_cgroups_table(data):
         swap_str = human_size(row['swap_bytes'])
         pid_str = str(row['root_pid'])
         service = row['service']
-        exes = ','.join(row['executables'])
 
-        if exes_width and len(exes) > exes_width:
-            exes = exes[:exes_width-3] + '...'
+        # Aggregate memory per executable name (prefer /proc/<pid>/comm).
+        # Count RSS+swap for each process, but include shared memory only once per executable
+        exe_rss_swap = {}
+        exe_shmem_once = {}
+        for p in (row.get('processes') or []):
+            try:
+                comm = get_proc_comm(p['pid']) or ''
+            except Exception:
+                comm = ''
+            if not comm:
+                # fallback to first token of cmdline
+                cmd = p.get('cmdline') or ''
+                comm = cmd.split(' ')[0] if cmd else ''
 
-        print(f"{total_str:>9} {memory_str:>9} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {service:40} {exes}")
+            rss = p.get('rss_bytes', 0)
+            swap = p.get('swap_bytes', 0)
+            shmem = p.get('shmem_bytes', 0)
+
+            exe_rss_swap[comm] = exe_rss_swap.get(comm, 0) + rss + swap
+            # include shared memory only once per executable: track the max shmem seen
+            exe_shmem_once[comm] = max(exe_shmem_once.get(comm, 0), shmem)
+
+        # Build sorted list by memory desc (rss+swap summed per-exe + shmem counted once per-exe)
+        exe_items = []
+        for name, rss_swap_sum in exe_rss_swap.items():
+            shmem_once = exe_shmem_once.get(name, 0)
+            total = rss_swap_sum + shmem_once
+            exe_items.append((name, total))
+
+        exe_items.sort(key=lambda x: x[1], reverse=True)
+        exes_with_mem = [f"{name}:{human_size(size)}" for name, size in exe_items if name]
+        exes_str = ','.join(exes_with_mem)
+
+        # Clip executables string to available width
+        if exes_width and len(exes_str) > exes_width:
+            exes_str = exes_str[:exes_width-3] + '...'
+
+        print(f"{total_str:>9} {memory_str:>9} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {service:40} {exes_str}")
 
 
 def print_processes_table(data, title=None):
@@ -220,6 +270,12 @@ def print_jsonl(data, include_processes=False):
     """Print data in JSON Lines format."""
     for row in data:
         output = {k: v for k, v in row.items() if k not in ['cgroup_path', 'pids']}
+        # Add a simple exe field (first executable name) to make grouping by executable easier with jq
+        exe = None
+        exes = row.get('executables') or []
+        if exes:
+            exe = exes[0]
+        output['exe'] = exe
         if include_processes:
             output['processes'] = []
             for pid in row['pids']:
