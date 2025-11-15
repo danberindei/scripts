@@ -1,0 +1,16 @@
+[Unit]
+Description=Create a directory on boot
+Documentation=man:systemd.unit(5)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment="CREATEDIR=/run/media/dan"
+Environment="OWNER=dan"
+Environment="GROUP=dan"
+Environment="MODE=700"
+ExecStart=/bin/sh -c 'mkdir -p "${CREATEDIR}" && chown "${OWNER}:${GROUP}" "${CREATEDIR}" && chmod "${MODE}" "${CREATEDIR}"'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
