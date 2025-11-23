@@ -65,6 +65,15 @@ def resolve_ref(ref):
         sys.exit(1)
 
 
+def is_ancestor(older, newer):
+    """Return True if older is an ancestor of newer."""
+    try:
+        run_git("merge-base", "--is-ancestor", older, newer)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
 def usage():
     """Print usage and exit."""
     prog = Path(sys.argv[0]).name
@@ -189,26 +198,47 @@ def action_squash(message, *commits):
         usage()
 
     full_commits = [resolve_ref(c) for c in commits]
+
+    if len(full_commits) != len(set(full_commits)):
+        print("Error: duplicate commits provided for squash", file=sys.stderr)
+        sys.exit(1)
+
+    oldest_full = None
+    newest_full = None
+
+    for candidate in full_commits:
+        if all(candidate == other or is_ancestor(candidate, other) for other in full_commits):
+            oldest_full = candidate
+            break
+
+    for candidate in full_commits:
+        if all(candidate == other or is_ancestor(other, candidate) for other in full_commits):
+            newest_full = candidate
+            break
+
+    if oldest_full is None or newest_full is None:
+        print("Error: commits are not on the same linear history", file=sys.stderr)
+        sys.exit(1)
+
+    history = run_git("rev-list", "--reverse", "--ancestry-path", f"{oldest_full}^..{newest_full}")
+    ordered = [c for c in history.splitlines() if c in full_commits]
+
+    if len(ordered) != len(full_commits):
+        print("Error: commits are not on the same linear history", file=sys.stderr)
+        sys.exit(1)
+
+    full_commits = list(reversed(ordered))
     short_commits = [git_rev_parse_short(f) for f in full_commits]
 
     for i in range(len(full_commits) - 1):
         current = full_commits[i]
         next_commit = full_commits[i + 1]
 
-        try:
-            run_git("merge-base", "--is-ancestor", next_commit, current)
-        except subprocess.CalledProcessError:
-            print(f"Error: commits are not in sequence", file=sys.stderr)
-            print(f"  {short_commits[i]} is not a descendant of {short_commits[i + 1]}", file=sys.stderr)
-            sys.exit(1)
-
         parent = git_rev_parse(f"{current}~1")
         if parent != next_commit:
             print(f"Error: commits are not consecutive", file=sys.stderr)
             print(f"  {short_commits[i]} and {short_commits[i + 1]} have commits between them", file=sys.stderr)
             sys.exit(1)
-
-    oldest_full = full_commits[-1]
 
     sed_cmds = [f"-e 's/^pick {short}/squash {short}/'" for short in short_commits[:-1]]
     sequence_editor = "sed -i " + " ".join(sed_cmds)
