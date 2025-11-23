@@ -30,21 +30,64 @@ def git_rev_parse_short(ref):
     return run_git("rev-parse", "--short", ref)
 
 
+def resolve_ref(ref):
+    """Resolve a reference to a commit hash.
+    
+    First tries to resolve as a git reference (hash, branch, HEAD~n).
+    If that fails, searches for a commit with matching message in current HEAD.
+    """
+    # Try as a git reference first
+    try:
+        return git_rev_parse(ref)
+    except subprocess.CalledProcessError:
+        pass
+    
+    # Search for commit by message (only in current HEAD)
+    try:
+        matches = run_git("log", "--format=%H", "--fixed-strings", f"--grep={ref}", "HEAD")
+        if not matches:
+            print(f"Error: no commit found matching '{ref}'", file=sys.stderr)
+            sys.exit(1)
+        
+        lines = matches.split('\n')
+        if len(lines) > 1:
+            print(f"Error: multiple commits match '{ref}':", file=sys.stderr)
+            for line in lines[:5]:  # Show first 5 matches
+                msg = run_git("log", "-1", "--format=%s", line)
+                print(f"  {git_rev_parse_short(line)} {msg}", file=sys.stderr)
+            if len(lines) > 5:
+                print(f"  ... and {len(lines) - 5} more", file=sys.stderr)
+            sys.exit(1)
+        
+        return lines[0]
+    except subprocess.CalledProcessError:
+        print(f"Error: could not resolve reference '{ref}'", file=sys.stderr)
+        sys.exit(1)
+
+
 def usage():
     """Print usage and exit."""
     prog = Path(sys.argv[0]).name
     print(f"Usage:")
-    print(f"  {prog} edit HASH")
-    print(f"  {prog} reword MESSAGE HASH")
-    print(f"  {prog} squash MESSAGE HASH...")
-    print(f"  {prog} move REF_HASH HASH...")
+    print(f"  {prog} edit HASH|MESSAGE")
+    print(f"  {prog} reword MESSAGE HASH|MESSAGE")
+    print(f"  {prog} squash MESSAGE HASH|MESSAGE...")
+    print(f"  {prog} move REF_HASH|MESSAGE HASH|MESSAGE...")
     print()
     print(f"Examples:")
     print(f"  {prog} edit HEAD~3")
+    print(f"  {prog} edit 'Fix typo in README'")
     print(f"  {prog} reword 'Fix typo in README' abc1234")
-    print(f"  {prog} squash 'Combined feature' abc1234 def5678 ghi9012")
-    print(f"  {prog} move abc1234 def5678 ghi9012")
+    print(f"  {prog} squash 'Combined feature' 'Add feature X' 'Fix feature X'")
+    print(f"  {prog} move 'Initial commit' 'Move this commit'")
     sys.exit(1)
+
+
+def run_rebase(args, env=None):
+    """Run git rebase, exiting with git's status to avoid stack traces."""
+    result = subprocess.run(["git", "rebase", "-i", *args], env=env)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
 
 
 def editor_reword(filepath, message):
@@ -115,19 +158,19 @@ def editor_move(filepath, ref_short, move_shorts):
 
 def action_edit(commit):
     """Mark a commit for editing."""
-    full = git_rev_parse(commit)
+    full = resolve_ref(commit)
     short = git_rev_parse_short(full)
 
     editor = f"sed -i -e 's/^pick {short}/edit {short}/'"
     env = os.environ.copy()
     env["GIT_SEQUENCE_EDITOR"] = editor
 
-    subprocess.run(["git", "rebase", "-i", f"{full}~1"], env=env, check=True)
+    run_rebase([f"{full}~1"], env)
 
 
 def action_reword(message, commit):
     """Reword a commit message."""
-    full = git_rev_parse(commit)
+    full = resolve_ref(commit)
     short = git_rev_parse_short(full)
 
     sequence_editor = f"sed -i -e 's/^pick {short}/reword {short}/'"
@@ -137,7 +180,7 @@ def action_reword(message, commit):
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
     env["GIT_EDITOR"] = git_editor
 
-    subprocess.run(["git", "rebase", "-i", f"{full}~1"], env=env, check=True)
+    run_rebase([f"{full}~1"], env)
 
 
 def action_squash(message, *commits):
@@ -145,7 +188,7 @@ def action_squash(message, *commits):
     if not commits:
         usage()
 
-    full_commits = [git_rev_parse(c) for c in commits]
+    full_commits = [resolve_ref(c) for c in commits]
     short_commits = [git_rev_parse_short(f) for f in full_commits]
 
     for i in range(len(full_commits) - 1):
@@ -175,7 +218,7 @@ def action_squash(message, *commits):
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
     env["GIT_EDITOR"] = git_editor
 
-    subprocess.run(["git", "rebase", "-i", f"{oldest_full}~1"], env=env, check=True)
+    run_rebase([f"{oldest_full}~1"], env)
 
 
 def action_move(ref_hash, *move_hashes):
@@ -187,10 +230,10 @@ def action_move(ref_hash, *move_hashes):
         print(f"Error: duplicate hashes in move list", file=sys.stderr)
         sys.exit(1)
 
-    ref_full = git_rev_parse(ref_hash)
+    ref_full = resolve_ref(ref_hash)
     ref_short = git_rev_parse_short(ref_full)
 
-    move_full = [git_rev_parse(h) for h in move_hashes]
+    move_full = [resolve_ref(h) for h in move_hashes]
     move_short = [git_rev_parse_short(f) for f in move_full]
 
     if len(move_short) != len(set(move_short)):
@@ -210,7 +253,7 @@ def action_move(ref_hash, *move_hashes):
     env = os.environ.copy()
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
 
-    subprocess.run(["git", "rebase", "-i", base], env=env, check=True)
+    run_rebase([base], env)
 
 
 def main():
