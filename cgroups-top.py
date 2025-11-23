@@ -214,7 +214,7 @@ def print_cgroups_table(data):
             exe_items.append((name, total))
 
         exe_items.sort(key=lambda x: x[1], reverse=True)
-        exes_with_mem = [f"{name}:{human_size(size)}" for name, size in exe_items if name]
+        exes_with_mem = [f"{name} {human_size(size)}" for name, size in exe_items if name]
         exes_str = ','.join(exes_with_mem)
 
         # Clip executables string to available width
