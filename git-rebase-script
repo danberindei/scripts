@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+
+SCRIPT_PATH = os.path.abspath(sys.argv[0])
 
 
 def run_git(*args, capture=True, check=True):
@@ -48,7 +52,7 @@ def editor_reword(filepath, message):
     with open(filepath, 'r') as f:
         content = f.read()
 
-    if content and '#' in content:
+    if content:
         with open(filepath, 'w') as f:
             f.write(message + '\n')
 
@@ -114,7 +118,7 @@ def action_edit(commit):
     full = git_rev_parse(commit)
     short = git_rev_parse_short(full)
 
-    editor = f"sed -i -e 's/pick {short}/edit {short}/'"
+    editor = f"sed -i -e 's/^pick {short}/edit {short}/'"
     env = os.environ.copy()
     env["GIT_SEQUENCE_EDITOR"] = editor
 
@@ -126,8 +130,8 @@ def action_reword(message, commit):
     full = git_rev_parse(commit)
     short = git_rev_parse_short(full)
 
-    sequence_editor = f"sed -i -e 's/pick {short}/reword {short}/'"
-    git_editor = f"{sys.argv[0]} --editor-reword {message!r}"
+    sequence_editor = f"sed -i -e 's/^pick {short}/reword {short}/'"
+    git_editor = f"{shlex.quote(SCRIPT_PATH)} --editor-reword {shlex.quote(message)}"
 
     env = os.environ.copy()
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
@@ -163,9 +167,9 @@ def action_squash(message, *commits):
 
     oldest_full = full_commits[-1]
 
-    sed_cmds = [f"-e 's/pick {short}/squash {short}/'" for short in short_commits[:-1]]
+    sed_cmds = [f"-e 's/^pick {short}/squash {short}/'" for short in short_commits[:-1]]
     sequence_editor = "sed -i " + " ".join(sed_cmds)
-    git_editor = f"{sys.argv[0]} --editor-squash {message!r}"
+    git_editor = f"{shlex.quote(SCRIPT_PATH)} --editor-squash {shlex.quote(message)}"
 
     env = os.environ.copy()
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
@@ -179,11 +183,19 @@ def action_move(ref_hash, *move_hashes):
     if not move_hashes:
         usage()
 
+    if len(move_hashes) != len(set(move_hashes)):
+        print(f"Error: duplicate hashes in move list", file=sys.stderr)
+        sys.exit(1)
+
     ref_full = git_rev_parse(ref_hash)
     ref_short = git_rev_parse_short(ref_full)
 
     move_full = [git_rev_parse(h) for h in move_hashes]
     move_short = [git_rev_parse_short(f) for f in move_full]
+
+    if len(move_short) != len(set(move_short)):
+        print(f"Error: duplicate commits after resolving hashes", file=sys.stderr)
+        sys.exit(1)
 
     try:
         base = git_rev_parse(f"{ref_full}~1")
@@ -191,8 +203,9 @@ def action_move(ref_hash, *move_hashes):
         print(f"Error: reference commit has no parent (root commit)", file=sys.stderr)
         sys.exit(1)
 
-    move_shorts_str = ' '.join(move_short)
-    sequence_editor = f"{sys.argv[0]} --editor-move {ref_short} {move_shorts_str}"
+    editor_args = [shlex.quote(SCRIPT_PATH), '--editor-move', shlex.quote(ref_short)]
+    editor_args.extend(shlex.quote(s) for s in move_short)
+    sequence_editor = ' '.join(editor_args)
 
     env = os.environ.copy()
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
