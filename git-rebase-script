@@ -270,11 +270,13 @@ def action_move(ref_hash, *move_hashes):
         print(f"Error: duplicate commits after resolving hashes", file=sys.stderr)
         sys.exit(1)
 
+    rebase_args = None
     try:
         base = git_rev_parse(f"{ref_full}~1")
+        rebase_args = [base]
     except subprocess.CalledProcessError:
-        print(f"Error: reference commit has no parent (root commit)", file=sys.stderr)
-        sys.exit(1)
+        # Reference commit is the root; rebase from the start of history.
+        rebase_args = ["--root"]
 
     editor_args = [shlex.quote(SCRIPT_PATH), '--editor-move', shlex.quote(ref_short)]
     editor_args.extend(shlex.quote(s) for s in move_short)
@@ -283,7 +285,7 @@ def action_move(ref_hash, *move_hashes):
     env = os.environ.copy()
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
 
-    run_rebase([base], env)
+    run_rebase(rebase_args, env)
 
 
 def main():
