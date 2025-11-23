@@ -78,7 +78,7 @@ def init():
 
 def finish():
   run_git("checkout -q %s" % checked_out_branch)
-  stashes = run_git("stash list --format='%s'")
+  stashes = run_git("stash list -n1 --format='%s'")
   if len(stashes) > 0 and ("sync_with_upstream backup" in stashes):
     try:
         run_git("stash pop")
