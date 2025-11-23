@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 
 import os
-import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -45,6 +43,72 @@ def usage():
     sys.exit(1)
 
 
+def editor_reword(filepath, message):
+    """Editor function for reword: replace commit message."""
+    with open(filepath, 'r') as f:
+        content = f.read()
+
+    if content and '#' in content:
+        with open(filepath, 'w') as f:
+            f.write(message + '\n')
+
+
+def editor_squash(filepath, message):
+    """Editor function for squash: replace combined commit message."""
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+
+    if lines and lines[0].startswith('# This is a combination of'):
+        with open(filepath, 'w') as f:
+            f.write(message + '\n')
+            for line in lines:
+                if line.startswith('#'):
+                    f.write(line)
+
+
+def editor_move(filepath, ref_short, move_shorts):
+    """Editor function for move: reorder commits in todo."""
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+
+    ref_line = None
+    ref_index = None
+    move_lines = {}
+    other_lines = []
+
+    for line in lines:
+        if line.startswith('pick '):
+            parts = line.split()
+            hash_match = parts[1] if len(parts) > 1 else None
+            if hash_match == ref_short:
+                ref_line = line
+                ref_index = len(other_lines)
+                other_lines.append(line)
+            elif hash_match in move_shorts:
+                move_lines[hash_match] = line
+            else:
+                other_lines.append(line)
+        else:
+            other_lines.append(line)
+
+    if ref_line is None:
+        print(f"Error: reference commit {ref_short} not found in rebase todo", file=sys.stderr)
+        sys.exit(1)
+
+    for short in move_shorts:
+        if short not in move_lines:
+            print(f"Error: commit {short} not found in rebase todo", file=sys.stderr)
+            sys.exit(1)
+
+    result = other_lines[:ref_index + 1]
+    for short in move_shorts:
+        result.append(move_lines[short])
+    result.extend(other_lines[ref_index + 1:])
+
+    with open(filepath, 'w') as f:
+        f.writelines(result)
+
+
 def action_edit(commit):
     """Mark a commit for editing."""
     full = git_rev_parse(commit)
@@ -62,28 +126,14 @@ def action_reword(message, commit):
     full = git_rev_parse(commit)
     short = git_rev_parse_short(full)
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-        f.write(f"""#!/bin/bash
-file=$1
-if [ -f "$file" ] && grep -q "^#" "$file"; then
-    cat > "$file" << 'EOF'
-{message}
-EOF
-fi
-""")
-        editor_script = f.name
+    sequence_editor = f"sed -i -e 's/pick {short}/reword {short}/'"
+    git_editor = f"{sys.argv[0]} --editor-reword {message!r}"
 
-    os.chmod(editor_script, 0o755)
+    env = os.environ.copy()
+    env["GIT_SEQUENCE_EDITOR"] = sequence_editor
+    env["GIT_EDITOR"] = git_editor
 
-    try:
-        sequence_editor = f"sed -i -e 's/pick {short}/reword {short}/'"
-        env = os.environ.copy()
-        env["GIT_SEQUENCE_EDITOR"] = sequence_editor
-        env["GIT_EDITOR"] = editor_script
-
-        subprocess.run(["git", "rebase", "-i", f"{full}~1"], env=env, check=True)
-    finally:
-        os.unlink(editor_script)
+    subprocess.run(["git", "rebase", "-i", f"{full}~1"], env=env, check=True)
 
 
 def action_squash(message, *commits):
@@ -115,33 +165,13 @@ def action_squash(message, *commits):
 
     sed_cmds = [f"-e 's/pick {short}/squash {short}/'" for short in short_commits[:-1]]
     sequence_editor = "sed -i " + " ".join(sed_cmds)
+    git_editor = f"{sys.argv[0]} --editor-squash {message!r}"
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-        f.write(f"""#!/bin/bash
-file=$1
-if [ -f "$file" ] && grep -q "^#" "$file"; then
-    first_line=$(head -1 "$file")
-    if echo "$first_line" | grep -q "^# This is a combination of"; then
-        cat > "$file.new" << 'EOF'
-{message}
-EOF
-        grep "^#" "$file" >> "$file.new"
-        mv "$file.new" "$file"
-    fi
-fi
-""")
-        editor_script = f.name
+    env = os.environ.copy()
+    env["GIT_SEQUENCE_EDITOR"] = sequence_editor
+    env["GIT_EDITOR"] = git_editor
 
-    os.chmod(editor_script, 0o755)
-
-    try:
-        env = os.environ.copy()
-        env["GIT_SEQUENCE_EDITOR"] = sequence_editor
-        env["GIT_EDITOR"] = editor_script
-
-        subprocess.run(["git", "rebase", "-i", f"{oldest_full}~1"], env=env, check=True)
-    finally:
-        os.unlink(editor_script)
+    subprocess.run(["git", "rebase", "-i", f"{oldest_full}~1"], env=env, check=True)
 
 
 def action_move(ref_hash, *move_hashes):
@@ -161,66 +191,40 @@ def action_move(ref_hash, *move_hashes):
         print(f"Error: reference commit has no parent (root commit)", file=sys.stderr)
         sys.exit(1)
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(f"""#!/usr/bin/env python3
-import sys
+    move_shorts_str = ' '.join(move_short)
+    sequence_editor = f"{sys.argv[0]} --editor-move {ref_short} {move_shorts_str}"
 
-ref_short = {ref_short!r}
-move_shorts = {move_short!r}
+    env = os.environ.copy()
+    env["GIT_SEQUENCE_EDITOR"] = sequence_editor
 
-with open(sys.argv[1], 'r') as f:
-    lines = f.readlines()
-
-ref_line = None
-ref_index = None
-move_lines = {{}}
-other_lines = []
-
-for i, line in enumerate(lines):
-    if line.startswith('pick '):
-        hash_match = line.split()[1] if len(line.split()) > 1 else None
-        if hash_match == ref_short:
-            ref_line = line
-            ref_index = len(other_lines)
-            other_lines.append(line)
-        elif hash_match in move_shorts:
-            move_lines[hash_match] = line
-        else:
-            other_lines.append(line)
-    else:
-        other_lines.append(line)
-
-if ref_line is None:
-    print(f"Error: reference commit {{ref_short}} not found in rebase todo", file=sys.stderr)
-    sys.exit(1)
-
-for short in move_shorts:
-    if short not in move_lines:
-        print(f"Error: commit {{short}} not found in rebase todo", file=sys.stderr)
-        sys.exit(1)
-
-result = other_lines[:ref_index + 1]
-for short in move_shorts:
-    result.append(move_lines[short])
-result.extend(other_lines[ref_index + 1:])
-
-with open(sys.argv[1], 'w') as f:
-    f.writelines(result)
-""")
-        editor_script = f.name
-
-    os.chmod(editor_script, 0o755)
-
-    try:
-        env = os.environ.copy()
-        env["GIT_SEQUENCE_EDITOR"] = editor_script
-
-        subprocess.run(["git", "rebase", "-i", base], env=env, check=True)
-    finally:
-        os.unlink(editor_script)
+    subprocess.run(["git", "rebase", "-i", base], env=env, check=True)
 
 
 def main():
+    if len(sys.argv) < 2:
+        usage()
+
+    if sys.argv[1] == "--editor-reword":
+        if len(sys.argv) != 4:
+            sys.exit(1)
+        editor_reword(sys.argv[3], sys.argv[2])
+        return
+
+    if sys.argv[1] == "--editor-squash":
+        if len(sys.argv) != 4:
+            sys.exit(1)
+        editor_squash(sys.argv[3], sys.argv[2])
+        return
+
+    if sys.argv[1] == "--editor-move":
+        if len(sys.argv) < 4:
+            sys.exit(1)
+        ref_short = sys.argv[2]
+        move_shorts = sys.argv[3:-1]
+        filepath = sys.argv[-1]
+        editor_move(filepath, ref_short, move_shorts)
+        return
+
     if len(sys.argv) < 3:
         usage()
 
