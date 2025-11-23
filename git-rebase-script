@@ -272,8 +272,18 @@ def action_squash(message, *commits):
         print("Error: commits are not on the same linear history", file=sys.stderr)
         sys.exit(1)
 
-    history = run_git("rev-list", "--reverse", "--ancestry-path", f"{oldest_full}^..{newest_full}")
+    oldest_parent = None
+    try:
+        oldest_parent = git_rev_parse(f"{oldest_full}~1")
+    except subprocess.CalledProcessError:
+        oldest_parent = None
+
+    history_range = f"{oldest_parent}..{newest_full}" if oldest_parent else f"{oldest_full}..{newest_full}"
+    history = run_git("rev-list", "--reverse", "--ancestry-path", history_range)
     ordered = [c for c in history.splitlines() if c in full_commits]
+
+    if oldest_parent is None:
+        ordered = [oldest_full] + ordered
 
     if len(ordered) != len(full_commits):
         print("Error: commits are not on the same linear history", file=sys.stderr)
@@ -291,7 +301,10 @@ def action_squash(message, *commits):
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
     env["GIT_EDITOR"] = git_editor
 
-    run_rebase([f"{oldest_full}~1"], env)
+    if oldest_parent:
+        run_rebase([oldest_parent], env)
+    else:
+        run_rebase(["--root"], env)
 
 
 def action_move(ref_hash, *move_hashes):
