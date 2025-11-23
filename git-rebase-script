@@ -1,0 +1,209 @@
+#!/bin/bash
+
+set -e
+
+program=$(basename "$0")
+
+function usage() {
+    echo "Usage:"
+    echo "  $program edit HASH"
+    echo "  $program reword MESSAGE HASH"
+    echo "  $program squash MESSAGE HASH..."
+    echo "  $program move REF_HASH HASH..."
+    echo ""
+    echo "Examples:"
+    echo "  $program edit HEAD~3"
+    echo "  $program reword 'Fix typo in README' abc1234"
+    echo "  $program squash 'Combined feature' abc1234 def5678 ghi9012"
+    echo "  $program move abc1234 def5678 ghi9012"
+    exit 1
+}
+
+[ "$#" -lt 2 ] && usage
+
+action=$1
+shift
+
+case $action in
+    edit)
+        commit=$1
+        [ -z "$commit" ] && usage
+
+        full=$(git rev-parse "$commit")
+        short=$(git rev-parse --short "$full")
+        replace="sed -i -e 's/pick ${short}/edit ${short}/'"
+        GIT_SEQUENCE_EDITOR=$replace git rebase -i "${full}~1"
+        ;;
+
+    reword)
+        message=$1
+        commit=$2
+        if [ -z "$message" ] || [ -z "$commit" ]; then
+            usage
+        fi
+
+        full=$(git rev-parse "$commit")
+        short=$(git rev-parse --short "$full")
+        replace="sed -i -e 's/pick ${short}/reword ${short}/'"
+
+        export REWORD_MESSAGE="$message"
+
+        editor_script=$(mktemp)
+        cat > "$editor_script" << 'EDITOR_EOF'
+#!/bin/bash
+file=$1
+if [ -f "$file" ] && grep -q "^#" "$file"; then
+    echo "$REWORD_MESSAGE" > "$file"
+fi
+EDITOR_EOF
+        chmod +x "$editor_script"
+
+        GIT_SEQUENCE_EDITOR=$replace GIT_EDITOR="$editor_script" git rebase -i "${full}~1"
+        rm -f "$editor_script"
+        ;;
+
+    squash)
+        message=$1
+        shift
+        [ -z "$message" ] || [ "$#" -lt 1 ] && usage
+
+        full_commits=()
+        short_commits=()
+        for hash in "$@"; do
+            full=$(git rev-parse "$hash")
+            short=$(git rev-parse --short "$full")
+            full_commits+=("$full")
+            short_commits+=("$short")
+        done
+
+        for i in $(seq 0 $((${#full_commits[@]} - 2))); do
+            current="${full_commits[$i]}"
+            next="${full_commits[$((i + 1))]}"
+            if ! git merge-base --is-ancestor "$next" "$current"; then
+                echo "Error: commits are not in sequence" >&2
+                echo "  ${short_commits[$i]} is not a descendant of ${short_commits[$((i + 1))]}" >&2
+                exit 1
+            fi
+            parent=$(git rev-parse "${current}~1")
+            if [ "$parent" != "$next" ]; then
+                echo "Error: commits are not consecutive" >&2
+                echo "  ${short_commits[$i]} and ${short_commits[$((i + 1))]} have commits between them" >&2
+                exit 1
+            fi
+        done
+
+        oldest_full="${full_commits[-1]}"
+
+        replace="sed -i"
+        for commit in "${short_commits[@]:0:${#short_commits[@]}-1}"; do
+            replace="$replace -e 's/pick ${commit}/squash ${commit}/'"
+        done
+
+        export SQUASH_MESSAGE="$message"
+
+        editor_script=$(mktemp)
+        cat > "$editor_script" << 'EDITOR_EOF'
+#!/bin/bash
+file=$1
+if [ -f "$file" ] && grep -q "^#" "$file"; then
+    first_line=$(head -1 "$file")
+    if echo "$first_line" | grep -q "^# This is a combination of"; then
+        echo "$SQUASH_MESSAGE" > "$file.new"
+        grep "^#" "$file" >> "$file.new"
+        mv "$file.new" "$file"
+    fi
+fi
+EDITOR_EOF
+        chmod +x "$editor_script"
+
+        GIT_SEQUENCE_EDITOR=$replace GIT_EDITOR="$editor_script" git rebase -i "${oldest_full}~1"
+        rm -f "$editor_script"
+        ;;
+
+    move)
+        ref_hash=$1
+        shift
+        [ -z "$ref_hash" ] || [ "$#" -lt 1 ] && usage
+
+        ref_full=$(git rev-parse "$ref_hash")
+        ref_short=$(git rev-parse --short "$ref_full")
+
+        move_full=()
+        move_short=()
+        for hash in "$@"; do
+            full=$(git rev-parse "$hash")
+            short=$(git rev-parse --short "$full")
+            move_full+=("$full")
+            move_short+=("$short")
+        done
+
+        all_commits=("$ref_full" "${move_full[@]}")
+        oldest=$(git rev-list --max-parents=0 HEAD)
+        base=$(git merge-base --octopus "${all_commits[@]}")
+
+        export REF_SHORT="$ref_short"
+        export MOVE_SHORTS="${move_short[*]}"
+
+        editor_script=$(mktemp)
+        cat > "$editor_script" << 'EDITOR_EOF'
+#!/bin/bash
+file=$1
+temp=$(mktemp)
+
+ref_line=""
+declare -A move_lines_map
+move_lines_order=()
+
+while IFS= read -r line; do
+    if [[ "$line" =~ ^pick\ ([a-f0-9]+) ]]; then
+        hash="${BASH_REMATCH[1]}"
+        if [ "$hash" = "$REF_SHORT" ]; then
+            ref_line="$line"
+            echo "$line" >> "$temp"
+        elif [[ " $MOVE_SHORTS " =~ " $hash " ]]; then
+            move_lines_map["$hash"]="$line"
+            move_lines_order+=("$hash")
+        else
+            echo "$line" >> "$temp"
+        fi
+    else
+        echo "$line" >> "$temp"
+    fi
+done < "$file"
+
+if [ -z "$ref_line" ]; then
+    echo "Error: reference commit $REF_SHORT not found in rebase todo" >&2
+    rm "$temp"
+    exit 1
+fi
+
+for short in $MOVE_SHORTS; do
+    if [ -z "${move_lines_map[$short]}" ]; then
+        echo "Error: commit $short not found in rebase todo" >&2
+        rm "$temp"
+        exit 1
+    fi
+done
+
+result=$(mktemp)
+while IFS= read -r line; do
+    echo "$line" >> "$result"
+    if [ "$line" = "$ref_line" ]; then
+        for hash in "${move_lines_order[@]}"; do
+            echo "${move_lines_map[$hash]}" >> "$result"
+        done
+    fi
+done < "$temp"
+mv "$result" "$file"
+rm "$temp"
+EDITOR_EOF
+        chmod +x "$editor_script"
+
+        GIT_SEQUENCE_EDITOR="$editor_script" git rebase -i "$base"
+        rm -f "$editor_script"
+        ;;
+
+    *)
+        usage
+        ;;
+esac
