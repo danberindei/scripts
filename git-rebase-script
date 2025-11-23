@@ -122,6 +122,58 @@ def editor_squash(filepath, message):
                     f.write(line)
 
 
+def replace_command(line, command):
+    """Replace the leading rebase command on a todo line."""
+    parts = line.split(maxsplit=1)
+    suffix = f" {parts[1]}" if len(parts) > 1 else ""
+    newline = '\n' if line.endswith('\n') else ''
+    return f"{command}{suffix}{newline}"
+
+
+def editor_squash_order(filepath, ordered_shorts):
+    """Editor for squash: reorder commits so they are consecutive."""
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+
+    index_by_short = {}
+    line_by_short = {}
+
+    for idx, line in enumerate(lines):
+        if not line.startswith('pick '):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        commit_short = parts[1]
+        if commit_short in ordered_shorts:
+            index_by_short[commit_short] = idx
+            line_by_short[commit_short] = line
+
+    for short in ordered_shorts:
+        if short not in index_by_short:
+            print(f"Error: commit {short} not found in rebase todo", file=sys.stderr)
+            sys.exit(1)
+
+    first_index = min(index_by_short.values())
+    selected_indices = set(index_by_short.values())
+
+    block = []
+    block.append(replace_command(line_by_short[ordered_shorts[0]], "pick"))
+    for short in ordered_shorts[1:]:
+        block.append(replace_command(line_by_short[short], "squash"))
+
+    result = []
+    for idx, line in enumerate(lines):
+        if idx == first_index:
+            result.extend(block)
+        if idx in selected_indices:
+            continue
+        result.append(line)
+
+    with open(filepath, 'w') as f:
+        f.writelines(result)
+
+
 def editor_move(filepath, ref_short, move_shorts):
     """Editor function for move: reorder commits in todo."""
     with open(filepath, 'r') as f:
@@ -193,7 +245,7 @@ def action_reword(message, commit):
 
 
 def action_squash(message, *commits):
-    """Squash consecutive commits together."""
+    """Squash commits together (any order)."""
     if not commits:
         usage()
 
@@ -227,22 +279,13 @@ def action_squash(message, *commits):
         print("Error: commits are not on the same linear history", file=sys.stderr)
         sys.exit(1)
 
-    full_commits = list(reversed(ordered))
+    full_commits = ordered
     short_commits = [git_rev_parse_short(f) for f in full_commits]
 
-    for i in range(len(full_commits) - 1):
-        current = full_commits[i]
-        next_commit = full_commits[i + 1]
-
-        parent = git_rev_parse(f"{current}~1")
-        if parent != next_commit:
-            print(f"Error: commits are not consecutive", file=sys.stderr)
-            print(f"  {short_commits[i]} and {short_commits[i + 1]} have commits between them", file=sys.stderr)
-            sys.exit(1)
-
-    sed_cmds = [f"-e 's/^pick {short}/squash {short}/'" for short in short_commits[:-1]]
-    sequence_editor = "sed -i " + " ".join(sed_cmds)
     git_editor = f"{shlex.quote(SCRIPT_PATH)} --editor-squash {shlex.quote(message)}"
+    editor_args = [shlex.quote(SCRIPT_PATH), '--editor-squash-order']
+    editor_args.extend(shlex.quote(s) for s in short_commits)
+    sequence_editor = ' '.join(editor_args)
 
     env = os.environ.copy()
     env["GIT_SEQUENCE_EDITOR"] = sequence_editor
@@ -302,6 +345,14 @@ def main():
         if len(sys.argv) != 4:
             sys.exit(1)
         editor_squash(sys.argv[3], sys.argv[2])
+        return
+
+    if sys.argv[1] == "--editor-squash-order":
+        if len(sys.argv) < 4:
+            sys.exit(1)
+        ordered_shorts = sys.argv[2:-1]
+        filepath = sys.argv[-1]
+        editor_squash_order(filepath, ordered_shorts)
         return
 
     if sys.argv[1] == "--editor-move":
