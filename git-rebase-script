@@ -155,8 +155,11 @@ def action_move(ref_hash, *move_hashes):
     move_full = [git_rev_parse(h) for h in move_hashes]
     move_short = [git_rev_parse_short(f) for f in move_full]
 
-    all_commits = [ref_full] + move_full
-    base = run_git("merge-base", "--octopus", *all_commits)
+    try:
+        base = git_rev_parse(f"{ref_full}~1")
+    except subprocess.CalledProcessError:
+        print(f"Error: reference commit has no parent (root commit)", file=sys.stderr)
+        sys.exit(1)
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
         f.write(f"""#!/usr/bin/env python3
