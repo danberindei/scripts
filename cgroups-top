@@ -162,7 +162,7 @@ def print_cgroups_table(data):
     max_pid_width = max(len(str(row['root_pid'])) for row in data)
 
     # Print header
-    print(f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables(Mem)'}")
+    print(f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables (Mem)'}")
     if is_tty:
         print("-" * terminal_width)
     else:
@@ -214,8 +214,8 @@ def print_cgroups_table(data):
             exe_items.append((name, total))
 
         exe_items.sort(key=lambda x: x[1], reverse=True)
-        exes_with_mem = [f"{name} {human_size(size)}" for name, size in exe_items if name]
-        exes_str = ','.join(exes_with_mem)
+        exes_with_mem = [f"{human_size(size)} {name}" for name, size in exe_items if name]
+        exes_str = ', '.join(exes_with_mem)
 
         # Clip executables string to available width
         if exes_width and len(exes_str) > exes_width:
