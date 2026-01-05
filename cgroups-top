@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
 import argparse
+import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -151,7 +154,7 @@ def get_terminal_width():
     return is_tty, terminal_width
 
 
-def print_cgroups_table(data):
+def print_cgroups_table(data, file=sys.stdout):
     """Print cgroup data in aligned table format."""
     if not data:
         return
@@ -162,11 +165,11 @@ def print_cgroups_table(data):
     max_pid_width = max(len(str(row['root_pid'])) for row in data)
 
     # Print header
-    print(f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables (Mem)'}")
+    print(f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables (Mem)'}", file=file)
     if is_tty:
-        print("-" * terminal_width)
+        print("-" * terminal_width, file=file)
     else:
-        print("-" * 100)
+        print("-" * 100, file=file)
 
     # Calculate fixed width for clipping. Executables column will include per-executable memory totals.
     fixed_width = 9 + 1 + 9 + 1 + 9 + 1 + 9 + 1 + max_pid_width + 1 + 40 + 1
@@ -221,10 +224,10 @@ def print_cgroups_table(data):
         if exes_width and len(exes_str) > exes_width:
             exes_str = exes_str[:exes_width-3] + '...'
 
-        print(f"{total_str:>9} {memory_str:>9} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {service:40} {exes_str}")
+        print(f"{total_str:>9} {memory_str:>9} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {service:40} {exes_str}", file=file)
 
 
-def print_processes_table(data, title=None):
+def print_processes_table(data, title=None, file=sys.stdout):
     """Print process data in aligned table format."""
     if not data:
         return
@@ -232,17 +235,17 @@ def print_processes_table(data, title=None):
     is_tty, terminal_width = get_terminal_width()
 
     if title:
-        print(title)
+        print(title, file=file)
 
     # Calculate max widths
     max_pid_width = max(len(str(row['pid'])) for row in data)
 
     # Print header
-    print(f"{'Total':>9} {'RSS':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'COMMAND'}")
+    print(f"{'Total':>9} {'RSS':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'COMMAND'}", file=file)
     if is_tty:
-        print("-" * terminal_width)
+        print("-" * terminal_width, file=file)
     else:
-        print("-" * 100)
+        print("-" * 100, file=file)
 
     # Calculate fixed width for clipping
     fixed_width = 9 + 1 + 9 + 1 + 9 + 1 + 9 + 1 + max_pid_width + 1
@@ -263,10 +266,10 @@ def print_processes_table(data, title=None):
         if cmdline_width and len(cmdline) > cmdline_width:
             cmdline = cmdline[:cmdline_width-3] + '...'
 
-        print(f"{total_str:>9} {rss_str:>9} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {cmdline}")
+        print(f"{total_str:>9} {rss_str:>9} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {cmdline}", file=file)
 
 
-def print_jsonl(data, include_processes=False):
+def print_jsonl(data, include_processes=False, file=sys.stdout):
     """Print data in JSON Lines format."""
     for row in data:
         output = {k: v for k, v in row.items() if k not in ['cgroup_path', 'pids']}
@@ -285,10 +288,10 @@ def print_jsonl(data, include_processes=False):
                     'comm': get_proc_comm(pid),
                     **mem
                 })
-        print(json.dumps(output))
+        print(json.dumps(output), file=file)
 
 
-def show_cgroup_processes(cgroup_name, limit=10):
+def show_cgroup_processes(cgroup_name, limit=10, file=sys.stdout):
     """Show individual process memory usage for a specific cgroup."""
     for cgroup_dir in Path("/sys/fs/cgroup").rglob("*"):
         if not cgroup_dir.is_dir():
@@ -326,27 +329,21 @@ def show_cgroup_processes(cgroup_name, limit=10):
                 processes = processes[:limit]
 
             # Use print_processes_table to display processes
-            print_processes_table(processes, title=f"Cgroup: {cgroup_dir}")
+            print_processes_table(processes, title=f"Cgroup: {cgroup_dir}", file=file)
 
-            return
+            return True
 
         except (ValueError, PermissionError):
             continue
 
     print(f"Cgroup '{cgroup_name}' not found", file=sys.stderr)
-    sys.exit(1)
+    return False
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Display cgroup memory usage')
-    parser.add_argument('--json', action='store_true', help='Output in JSON Lines format')
-    parser.add_argument('--processes', metavar='CGROUP', help='Show individual process memory for a specific cgroup')
-    parser.add_argument('--include-processes', action='store_true', help='Include process details in JSON output')
-    parser.add_argument('-n', '--limit', type=int, default=10, help='Number of top entries to show (default: 10, use 0 for all)')
-    args = parser.parse_args()
-
+def run_once(args, file=sys.stdout):
     if args.processes:
-        show_cgroup_processes(args.processes, args.limit)
+        if not show_cgroup_processes(args.processes, args.limit, file=file) and not args.watch:
+            sys.exit(1)
         return
 
     data = collect_cgroup_data()
@@ -355,11 +352,37 @@ def main():
     if not args.json and args.limit > 0:
         data = data[:args.limit]
 
+    if args.json:
+        print_jsonl(data, include_processes=args.include_processes, file=file)
+    else:
+        print_cgroups_table(data, file=file)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Display cgroup memory usage')
+    parser.add_argument('--json', action='store_true', help='Output in JSON Lines format')
+    parser.add_argument('--processes', metavar='CGROUP', help='Show individual process memory for a specific cgroup')
+    parser.add_argument('--include-processes', action='store_true', help='Include process details in JSON output')
+    parser.add_argument('-n', '--limit', type=int, default=10, help='Number of top entries to show (default: 10, use 0 for all)')
+    parser.add_argument('--watch', action='store_true', help='Refresh output periodically')
+    parser.add_argument('--interval', type=int, default=2, help='Refresh interval in seconds (default: 2)')
+    args = parser.parse_args()
+
     try:
-        if args.json:
-            print_jsonl(data, include_processes=args.include_processes)
+        if args.watch:
+            while True:
+                buf = io.StringIO()
+                run_once(args, file=buf)
+                output = buf.getvalue()
+                # Clear screen and move to top (ANSI escape codes)
+                # \033[H: Move cursor to home (top-left)
+                # \033[J: Clear from cursor to end of screen
+                print(f"\033[H{output}\033[J", end="", flush=True)
+                time.sleep(args.interval)
         else:
-            print_cgroups_table(data)
+            run_once(args)
+    except KeyboardInterrupt:
+        pass
     except BrokenPipeError:
         print("Broken pipe", file=sys.stderr)
         sys.exit(1)
