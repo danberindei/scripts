@@ -45,12 +45,18 @@ def get_proc_memory(pid):
     try:
         status = Path(f"/proc/{pid}/status").read_text()
         rss_kb = 0
+        file_kb = 0
+        anon_kb = 0
         swap_kb = 0
         shmem_kb = 0
 
         for line in status.split('\n'):
             if line.startswith('VmRSS:'):
                 rss_kb = int(line.split()[1])
+            elif line.startswith('RssFile:'):
+                file_kb = int(line.split()[1])
+            elif line.startswith('RssAnon:'):
+                anon_kb = int(line.split()[1])
             elif line.startswith('VmSwap:'):
                 swap_kb = int(line.split()[1])
             elif line.startswith('RssShmem:'):
@@ -58,11 +64,13 @@ def get_proc_memory(pid):
 
         return {
             'rss_bytes': rss_kb * 1024,
+            'file_bytes': file_kb * 1024,
+            'anon_bytes': anon_kb * 1024,
             'swap_bytes': swap_kb * 1024,
             'shmem_bytes': shmem_kb * 1024
         }
     except (FileNotFoundError, PermissionError, ValueError):
-        return {'rss_bytes': 0, 'swap_bytes': 0, 'shmem_bytes': 0}
+        return {'rss_bytes': 0, 'file_bytes': 0, 'anon_bytes': 0, 'swap_bytes': 0, 'shmem_bytes': 0}
 
 
 def collect_cgroup_data():
@@ -82,16 +90,21 @@ def collect_cgroup_data():
             continue
 
         try:
-            memory_bytes = int(memory_file.read_text().strip())
-            swap_bytes = int(swap_file.read_text().strip()) if swap_file.exists() else 0
-
-            # Extract shmem from memory.stat
+            # Extract shmem and inactive_file from memory.stat
             shmem_bytes = 0
+            inactive_file_bytes = 0
             if stat_file.exists():
                 for line in stat_file.read_text().split('\n'):
                     if line.startswith('shmem '):
                         shmem_bytes = int(line.split()[1])
-                        break
+                    elif line.startswith('inactive_file '):
+                        inactive_file_bytes = int(line.split()[1])
+
+            memory_bytes = int(memory_file.read_text().strip())
+            # Don't include inactive file cache in the cgroup total
+            memory_bytes -= inactive_file_bytes
+
+            swap_bytes = int(swap_file.read_text().strip()) if swap_file.exists() else 0
 
             pids = [int(p) for p in procs_file.read_text().strip().split('\n') if p]
             if not pids:
@@ -111,7 +124,9 @@ def collect_cgroup_data():
             for pid in pids:
                 cmdline = get_proc_cmdline(pid) or get_proc_comm(pid) or ''
                 mem = get_proc_memory(pid)
-                total = mem['rss_bytes'] + mem['swap_bytes'] + mem['shmem_bytes']
+                # Include RssFile (file_bytes) as it represents the "active" file cache for the process
+                # rss_bytes already includes anon_bytes + file_bytes + shmem_bytes
+                total = mem['rss_bytes'] + mem['swap_bytes']
                 processes.append({
                     'pid': pid,
                     'cmdline': cmdline,
@@ -139,8 +154,9 @@ def collect_cgroup_data():
         except (ValueError, PermissionError):
             continue
 
-    # Sort by total memory usage (memory + swap + shmem)
-    results.sort(key=lambda x: x['memory_bytes'] + x['swap_bytes'] + x['shmem_bytes'], reverse=True)
+    # Sort by total memory usage (memory + swap)
+    # memory_bytes already includes shmem
+    results.sort(key=lambda x: x['memory_bytes'] + x['swap_bytes'], reverse=True)
     return results
 
 
@@ -179,7 +195,8 @@ def print_cgroups_table(data, file=sys.stdout):
         exes_width = None
 
     for row in data:
-        total_bytes = row['memory_bytes'] + row['swap_bytes'] + row['shmem_bytes']
+        # memory_bytes already includes shmem
+        total_bytes = row['memory_bytes'] + row['swap_bytes']
         total_str = human_size(total_bytes)
         memory_str = human_size(row['memory_bytes'])
         shmem_str = human_size(row['shmem_bytes'])
@@ -188,9 +205,10 @@ def print_cgroups_table(data, file=sys.stdout):
         service = row['service']
 
         # Aggregate memory per executable name (prefer /proc/<pid>/comm).
-        # Count RSS+swap for each process, but include shared memory only once per executable
-        exe_rss_swap = {}
+        # Count anon+swap for each process, but include shmem and mapped files only once per executable
+        exe_anon_swap = {}
         exe_shmem_once = {}
+        exe_file_once = {}
         for p in (row.get('processes') or []):
             try:
                 comm = get_proc_comm(p['pid']) or ''
@@ -201,19 +219,22 @@ def print_cgroups_table(data, file=sys.stdout):
                 cmd = p.get('cmdline') or ''
                 comm = cmd.split(' ')[0] if cmd else ''
 
-            rss = p.get('rss_bytes', 0)
+            anon = p.get('anon_bytes', 0)
             swap = p.get('swap_bytes', 0)
             shmem = p.get('shmem_bytes', 0)
+            file_mem = p.get('file_bytes', 0)
 
-            exe_rss_swap[comm] = exe_rss_swap.get(comm, 0) + rss + swap
-            # include shared memory only once per executable: track the max shmem seen
+            exe_anon_swap[comm] = exe_anon_swap.get(comm, 0) + anon + swap
+            # include shared memory and mapped files only once per executable: track the max seen
             exe_shmem_once[comm] = max(exe_shmem_once.get(comm, 0), shmem)
+            exe_file_once[comm] = max(exe_file_once.get(comm, 0), file_mem)
 
-        # Build sorted list by memory desc (rss+swap summed per-exe + shmem counted once per-exe)
+        # Build sorted list by memory desc (anon+swap summed per-exe + shmem/file counted once per-exe)
         exe_items = []
-        for name, rss_swap_sum in exe_rss_swap.items():
+        for name, anon_swap_sum in exe_anon_swap.items():
             shmem_once = exe_shmem_once.get(name, 0)
-            total = rss_swap_sum + shmem_once
+            file_once = exe_file_once.get(name, 0)
+            total = anon_swap_sum + shmem_once + file_once
             exe_items.append((name, total))
 
         exe_items.sort(key=lambda x: x[1], reverse=True)
@@ -255,7 +276,9 @@ def print_processes_table(data, title=None, file=sys.stdout):
         cmdline_width = None
 
     for row in data:
-        total_bytes = row['rss_bytes'] + row['swap_bytes'] + row['shmem_bytes']
+        # Include RssFile (file_bytes) as it represents the "active" file cache for the process
+        # rss_bytes already includes anon_bytes + file_bytes + shmem_bytes
+        total_bytes = row['rss_bytes'] + row['swap_bytes']
         total_str = human_size(total_bytes)
         rss_str = human_size(row['rss_bytes'])
         shmem_str = human_size(row['shmem_bytes'])
@@ -321,8 +344,8 @@ def show_cgroup_processes(cgroup_name, limit=10, file=sys.stdout):
                         **mem
                     })
 
-            # Sort by total memory
-            processes.sort(key=lambda x: x['rss_bytes'] + x['swap_bytes'] + x['shmem_bytes'], reverse=True)
+            # Sort by total memory (RSS + Swap)
+            processes.sort(key=lambda x: x['rss_bytes'] + x['swap_bytes'], reverse=True)
 
             # Apply limit
             if limit > 0:
