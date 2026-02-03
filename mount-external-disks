@@ -1,0 +1,194 @@
+#!/bin/bash
+#
+# Mount external disks
+# Automatically discovers USB-connected partitions and handles LUKS encryption
+#
+
+set -euo pipefail
+
+MOUNT_BASE="/run/media/dan"
+MIN_PARTITION_SIZE=$((1000 * 1024 * 1024))
+
+# Discover USB-connected partitions
+discover_usb_partitions() {
+    local usb_disks partitions disk part size
+
+    # Find USB disks
+    usb_disks=$(lsblk -rno NAME,TYPE,TRAN | awk '$2=="disk" && $3=="usb" {print $1}')
+
+    for disk in $usb_disks; do
+        # Find partitions of this disk
+        partitions=$(lsblk -rno NAME,TYPE "/dev/$disk" | awk '$2=="part" {print $1}')
+
+        for part in $partitions; do
+            # Skip small partitions (EFI, recovery, etc.)
+            size=$(lsblk -brno SIZE "/dev/$part" | head -1)
+            if [[ "$size" -lt "$MIN_PARTITION_SIZE" ]]; then
+                continue
+            fi
+            echo "/dev/$part"
+        done
+    done
+}
+
+# Check if device is a LUKS container
+is_luks() {
+    local device="$1"
+    local fstype
+    fstype=$(lsblk -rno FSTYPE "$device" 2>/dev/null) || true
+    [[ "$fstype" == "crypto_LUKS" ]]
+}
+
+# Get LUKS UUID for a device
+get_luks_uuid() {
+    local device="$1"
+    blkid -o value -s UUID "$device" 2>/dev/null || true
+}
+
+# Get filesystem label, fall back to UUID prefix
+get_mount_label() {
+    local device="$1"
+    local label uuid
+
+    label=$(lsblk -rno LABEL "$device" 2>/dev/null) || true
+    if [[ -n "$label" ]]; then
+        echo "$label"
+        return
+    fi
+
+    uuid=$(lsblk -rno UUID "$device" 2>/dev/null) || true
+    if [[ -n "$uuid" ]]; then
+        echo "${uuid:0:8}"
+        return
+    fi
+
+    # Last resort: use device name
+    basename "$device"
+}
+
+# Check if LUKS container is already open
+is_luks_open() {
+    local name="$1"
+    [[ -e "/dev/mapper/$name" ]]
+}
+
+# Check if filesystem is already mounted
+is_mounted() {
+    local mountpoint="$1"
+    mountpoint -q "$mountpoint" 2>/dev/null
+}
+
+# Check if any LUKS partitions need opening
+any_luks_needs_opening() {
+    local partitions partition uuid mapper_name
+
+    partitions=$(discover_usb_partitions)
+
+    for partition in $partitions; do
+        if is_luks "$partition"; then
+            uuid=$(get_luks_uuid "$partition")
+            mapper_name="luks-$uuid"
+            if ! is_luks_open "$mapper_name"; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+# Mount a partition
+mount_disk() {
+    local partition="$1"
+    local password="${2:-}"
+    local uuid mapper_name device label mountpoint
+
+    echo "=== $partition ==="
+
+    if is_luks "$partition"; then
+        uuid=$(get_luks_uuid "$partition")
+        mapper_name="luks-$uuid"
+        device="/dev/mapper/$mapper_name"
+
+        echo "  LUKS encrypted (UUID: $uuid)"
+
+        # Open LUKS container if not already open
+        if is_luks_open "$mapper_name"; then
+            echo "  LUKS container already open"
+        else
+            echo "  Opening LUKS container..."
+            if [[ -n "$password" ]]; then
+                if ! echo "$password" | sudo cryptsetup open "$partition" "$mapper_name"; then
+                    echo "  Failed to open LUKS container"
+                    return 1
+                fi
+            else
+                if ! sudo cryptsetup open "$partition" "$mapper_name"; then
+                    echo "  Failed to open LUKS container"
+                    return 1
+                fi
+            fi
+            echo "  LUKS container opened"
+        fi
+
+        # Get label from the inner filesystem
+        label=$(get_mount_label "$device")
+    else
+        device="$partition"
+        label=$(get_mount_label "$device")
+        echo "  Plain filesystem"
+    fi
+
+    mountpoint="$MOUNT_BASE/$label"
+
+    # Create mount point if needed
+    if [[ ! -d "$mountpoint" ]]; then
+        sudo mkdir -p "$mountpoint"
+    fi
+
+    # Mount if not already mounted
+    if is_mounted "$mountpoint"; then
+        echo "  Already mounted at $mountpoint"
+    else
+        echo "  Mounting to $mountpoint..."
+        if ! sudo mount "$device" "$mountpoint"; then
+            echo "  Failed to mount"
+            return 1
+        fi
+        echo "  Mounted successfully"
+    fi
+
+    return 0
+}
+
+main() {
+    local partitions partition
+    local success=0
+    local failed=0
+    local password=""
+
+    partitions=$(discover_usb_partitions)
+
+    if [[ -z "$partitions" ]]; then
+        echo "No USB partitions found"
+        exit 0
+    fi
+
+    # Prompt for password once if any LUKS partitions need opening
+    if any_luks_needs_opening; then
+        read -s -p "Enter LUKS password: " password
+        echo
+    fi
+
+    for partition in $partitions; do
+        if mount_disk "$partition" "$password"; then
+            ((++success))
+        else
+            ((++failed))
+        fi
+        echo
+    done
+
+    echo "Summary: $success mounted, $failed failed"
+}
+
+main "$@"
