@@ -25,7 +25,7 @@ def get_proc_comm(pid):
     """Get command name for a PID."""
     try:
         return Path(f"/proc/{pid}/comm").read_text().strip()
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
         return None
 
 
@@ -36,7 +36,7 @@ def get_proc_cmdline(pid):
         if cmdline:
             return ' '.join(cmdline.split('\x00')).strip()
         return get_proc_comm(pid)
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
         return None
 
 
@@ -69,7 +69,7 @@ def get_proc_memory(pid):
             'swap_bytes': swap_kb * 1024,
             'shmem_bytes': shmem_kb * 1024
         }
-    except (FileNotFoundError, PermissionError, ValueError):
+    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
         return {'rss_bytes': 0, 'file_bytes': 0, 'anon_bytes': 0, 'swap_bytes': 0, 'shmem_bytes': 0}
 
 
