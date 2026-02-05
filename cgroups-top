@@ -400,7 +400,7 @@ def main():
                 # Clear screen and move to top (ANSI escape codes)
                 # \033[H: Move cursor to home (top-left)
                 # \033[J: Clear from cursor to end of screen
-                print(f"\033[H{output}\033[J", end="", flush=True)
+                print(f"\033[H\033[J{output}", end="", flush=True)
                 time.sleep(args.interval)
         else:
             run_once(args)
