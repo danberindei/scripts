@@ -34,15 +34,13 @@ discover_usb_partitions() {
 # Check if device is a LUKS container
 is_luks() {
     local device="$1"
-    local fstype
-    fstype=$(lsblk -rno FSTYPE "$device" 2>/dev/null) || true
-    [[ "$fstype" == "crypto_LUKS" ]]
+    sudo cryptsetup isLuks "$device" 2>/dev/null
 }
 
 # Get LUKS UUID for a device
 get_luks_uuid() {
     local device="$1"
-    blkid -o value -s UUID "$device" 2>/dev/null || true
+    sudo blkid -o value -s UUID "$device" 2>/dev/null || true
 }
 
 # Get filesystem label, fall back to UUID prefix
@@ -50,13 +48,13 @@ get_mount_label() {
     local device="$1"
     local label uuid
 
-    label=$(lsblk -rno LABEL "$device" 2>/dev/null) || true
+    label=$(sudo blkid -o value -s LABEL "$device" 2>/dev/null) || true
     if [[ -n "$label" ]]; then
         echo "$label"
         return
     fi
 
-    uuid=$(lsblk -rno UUID "$device" 2>/dev/null) || true
+    uuid=$(sudo blkid -o value -s UUID "$device" 2>/dev/null) || true
     if [[ -n "$uuid" ]]; then
         echo "${uuid:0:8}"
         return
