@@ -151,7 +151,7 @@ def collect_cgroup_data():
                 'pids': pids
             })
 
-        except (ValueError, PermissionError):
+        except (FileNotFoundError, ValueError, PermissionError):
             continue
 
     # Sort by total memory usage (memory + swap)
@@ -356,7 +356,7 @@ def show_cgroup_processes(cgroup_name, limit=10, file=sys.stdout):
 
             return True
 
-        except (ValueError, PermissionError):
+        except (FileNotFoundError, ValueError, PermissionError):
             continue
 
     print(f"Cgroup '{cgroup_name}' not found", file=sys.stderr)
