@@ -34,7 +34,9 @@ for tb in $(git_ls_branches $TOPIC_BRANCH_PREFIX) ; do
   if git switch -q $tb ; then
     # The rebase could fail because it has conflicts
     git rebase $rb $tb &>/dev/null || git rebase --abort
-    if git merge-base --is-ancestor $tb $rb ; then
+    tb_head=$(git rev-parse "$tb")
+    rb_head=$(git rev-parse "$rb")
+    if [[ "$tb_head" == "$rb_head" ]] || git merge-base --is-ancestor $tb $rb ; then
       echo Removing topic branch $tb merged in $rb
       git checkout -q $rb
       git branch --set-upstream-to=$rb $tb
@@ -53,7 +55,9 @@ for tb in $(git_ls_branches $PR_BRANCH_PREFIX) ; do
   if git switch -q $tb ; then
     # The rebase could fail because it has conflicts
     git rebase $rb $tb &>/dev/null || git rebase --abort
-    if git merge-base --is-ancestor $tb $rb ; then
+    tb_head=$(git rev-parse "$tb")
+    rb_head=$(git rev-parse "$rb")
+    if [[ "$tb_head" == "$rb_head" ]] || git merge-base --is-ancestor $tb $rb ; then
       echo Removing PR review branch $tb merged in $rb
       git checkout -q $rb
       git branch --set-upstream-to=$UPSTREAM/$rb $tb
