@@ -23,7 +23,6 @@ GIT="git" # Path to the git binary executable
 CONFIG_UPSTREAM_REPO="sync.upstreamRepo"
 CONFIG_RELEASE_BRANCHES="sync.releaseBranches"
 CONFIG_TOPIC_BRANCH_PREFIX="sync.topicBranchPrefix"
-CONFIG_MIRROR_MASTER_TO_MAIN="sync.mirrorMasterToMain"
 
 #
 ############################################################################
@@ -101,13 +100,6 @@ def is_push_needed(branch):
 def is_rebase_needed(branch, release_branch):
   upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
   return upstream_only_commit != ''
-
-def mirror_master_to_main():
-  should_mirror = run_git("config get --default=false %s" % CONFIG_MIRROR_MASTER_TO_MAIN).strip()
-  if should_mirror == "true":
-    print("Synchronizing master to main")
-    run_git("checkout --ignore-other-worktrees -q main")
-    run_git("reset --hard master")
 
 def handle_release_branches():
   #print("Release branches are %s" % branches)
@@ -233,19 +225,6 @@ def parse_args():
     print(str(err)) # will print something like "option -a not recognized"
     sys.exit(2)
 
-  upstream_repo = run_git(f"config get --default={DEFAULT_UPSTREAM_REPO} {CONFIG_UPSTREAM_REPO}").strip()
-  if upstream_repo == "":
-    upstream_repo = DEFAULT_UPSTREAM_REPO
-
-  release_branches = run_git("config get %s" % CONFIG_RELEASE_BRANCHES).split()
-  if release_branches == "":
-    print("Please configure release branches with %s" % CONFIG_RELEASE_BRANCHES)
-
-  try:
-    topic_branch_prefix = run_git("config get %s" % CONFIG_TOPIC_BRANCH_PREFIX).strip()
-  except Exception:
-    topic_branch_prefix = DEFAULT_TOPIC_BRANCH_PREFIX
-
   for o, a in opts:
     if o in ("-p", "--push"):
       push_to_origin = True
@@ -257,6 +236,21 @@ def parse_args():
     else:
       assert False, "unhandled option"
 
+  upstream_repo = run_git(f"config get --default={DEFAULT_UPSTREAM_REPO} {CONFIG_UPSTREAM_REPO}").strip()
+  if upstream_repo == "":
+    upstream_repo = DEFAULT_UPSTREAM_REPO
+
+  try:
+    release_branches = run_git("config get %s" % CONFIG_RELEASE_BRANCHES).split()
+  except Exception:
+    print("Please configure release branches with: git config set %s '<branch1> <branch2> ...'" % CONFIG_RELEASE_BRANCHES)
+    sys.exit(1)
+
+  try:
+    topic_branch_prefix = run_git("config get %s" % CONFIG_TOPIC_BRANCH_PREFIX).strip()
+  except Exception:
+    topic_branch_prefix = DEFAULT_TOPIC_BRANCH_PREFIX
+
 def usage():
   print("usage: ", sys.argv[0],"[-u <upstream repo>] [-b <comma separated branches>] [-p]")
 
@@ -264,7 +258,6 @@ def main():
   parse_args()
   init()
   handle_release_branches()
-  mirror_master_to_main()
   print("Local release branches %s synced with %s" % (release_branches, upstream_repo))
   print("Now rebasing all topic branches that start with '%s'" % topic_branch_prefix)
   handle_topics()
