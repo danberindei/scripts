@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kitty integration
+#   map ctrl+shift+o kitten hints --type regex --regex '(?:[./~A-Za-z0-9_-]*/)[A-Za-z0-9._-]*\.[A-Za-z0-9_-]+:[0-9]+' --program /home/dan/Tools/bin/open-idea-fileline
+# This script expects: path/to/file.ext:line
+# Example match: .github/workflows/deploy-app.yml:97
+# The regex requires an extension on the final filename segment, not just in directory names.
+
+debug() {
+  if [[ "${OPEN_IDEA_FILELINE_DEBUG:-0}" == "1" ]]; then
+    msg="DEBUG: $*"
+    echo "$msg" >&2
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >> /tmp/open-idea-fileline.log
+  fi
+}
+
+find_project_dir_for_file() {
+  local target_file="$1"
+  local dir
+  local probe
+
+  dir="$(dirname "$target_file")"
+  probe="$dir"
+  while [[ "$probe" != "/" && -n "$probe" ]]; do
+    if [[ -d "$probe/.idea" ]]; then
+      echo "$probe"
+      return 0
+    fi
+    probe="$(dirname "$probe")"
+  done
+
+  git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true
+}
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: $0 path/to/file.ext:line" >&2
+  exit 2
+fi
+
+ref="$1"
+file="${ref%:*}"
+line="${ref##*:}"
+debug "input_ref=$ref"
+
+if [[ -z "$file" || -z "$line" || "$file" == "$ref" || ! "$line" =~ ^[0-9]+$ ]]; then
+  echo "invalid reference: $ref (expected path/to/file.ext:line)" >&2
+  exit 2
+fi
+
+# Resolve relative paths from cwd first, then git root when available.
+if [[ ! -f "$file" ]]; then
+  if root="$(git rev-parse --show-toplevel 2>/dev/null)" && [[ -f "$root/$file" ]]; then
+    file="$root/$file"
+    debug "resolved_from_git_root=$file"
+  fi
+fi
+
+# If the file path is incomplete, try resolving with fd from the current dir.
+if [[ ! -f "$file" ]] && command -v fd >/dev/null 2>&1; then
+  base_name="$(basename "$file")"
+  wanted_suffix="${file#./}"
+  mapfile -t fd_candidates < <(fd --type f --hidden --follow --exclude .git --fixed-strings "$base_name" . 2>/dev/null || true)
+
+  if [[ ${#fd_candidates[@]} -gt 0 ]]; then
+    suffix_matches=()
+    for candidate in "${fd_candidates[@]}"; do
+      candidate_rel="${candidate#./}"
+      if [[ "$candidate_rel" == "$wanted_suffix" || "$candidate_rel" == *"/$wanted_suffix" ]]; then
+        suffix_matches+=("$candidate")
+      fi
+    done
+
+    if [[ ${#suffix_matches[@]} -eq 1 ]]; then
+      file="${suffix_matches[0]}"
+      debug "resolved_from_fd_suffix=$file"
+    elif [[ ${#suffix_matches[@]} -gt 1 ]]; then
+      echo "ambiguous file reference: $file" >&2
+      printf 'matches:\n' >&2
+      printf ' - %s\n' "${suffix_matches[@]}" >&2
+      exit 1
+    elif [[ ${#fd_candidates[@]} -eq 1 ]]; then
+      file="${fd_candidates[0]}"
+      debug "resolved_from_fd_basename=$file"
+    else
+      echo "ambiguous file reference: $file" >&2
+      printf 'basename matches:\n' >&2
+      printf ' - %s\n' "${fd_candidates[@]}" >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [[ ! -f "$file" ]]; then
+  echo "file not found: $file" >&2
+  exit 1
+fi
+if command -v realpath >/dev/null 2>&1; then
+  file="$(realpath "$file")"
+fi
+debug "final_file=$file final_line=$line"
+project_dir="$(find_project_dir_for_file "$file")"
+if [[ -n "${project_dir:-}" ]]; then
+  debug "project_dir=$project_dir"
+fi
+
+if ! command -v idea >/dev/null 2>&1; then
+  echo "IntelliJ launcher not found on PATH ('idea')." >&2
+  exit 1
+fi
+debug "idea_bin=idea"
+
+if [[ -n "${project_dir:-}" ]]; then
+  idea "$project_dir" --line "$line" "$file" &
+else
+  idea --line "$line" "$file" &
+fi
+idea_cli_pid=$!
+wait "$idea_cli_pid"
