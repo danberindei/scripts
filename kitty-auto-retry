@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import time
+import unicodedata
+from typing import Any
+
+
+def die(msg: str) -> None:
+    print(f"### {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def run_kitty(args: list[str], allow_fail: bool = False) -> subprocess.CompletedProcess[str]:
+    cmd = ["kitty", "@", *args]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 and not allow_fail:
+        stderr = proc.stderr.strip()
+        detail = f": {stderr}" if stderr else ""
+        die(f"kitty command failed{' '.join([''] + args)}{detail}")
+    return proc
+
+
+def get_kitty_ls() -> list[dict[str, Any]]:
+    proc = run_kitty(["ls"])
+    raw = proc.stdout.strip()
+    if not raw:
+        die("kitty returned empty window data (ensure allow_remote_control is enabled)")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        snippet = raw.splitlines()[0][:160] if raw else ""
+        die(f"failed to parse kitty window data (first line: {snippet})")
+    if not isinstance(data, list):
+        die("unexpected kitty window data format")
+    return data
+
+
+def normalized_title(title: str) -> str:
+    text = unicodedata.normalize("NFKC", title)
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        cat = unicodedata.category(ch)
+        if ch.isspace() or cat in {"Cc", "Cf", "Zs"}:
+            i += 1
+            continue
+        break
+    return text[i:]
+
+
+def find_current_tab_id(data: list[dict[str, Any]]) -> str | None:
+    current_window_id = os.environ.get("KITTY_WINDOW_ID", "")
+    if not current_window_id:
+        return None
+    for os_window in data:
+        for tab in os_window.get("tabs", []):
+            for win in tab.get("windows", []):
+                if str(win.get("id", "")) == current_window_id:
+                    return str(tab.get("id", ""))
+    return None
+
+
+def iter_windows(data: list[dict[str, Any]], same_tab: bool) -> list[tuple[str, str]]:
+    selected: list[tuple[str, str]] = []
+    tab_id = find_current_tab_id(data) if same_tab else None
+    if same_tab and not tab_id:
+        die("--same-tab requires running inside kitty (missing/unknown KITTY_WINDOW_ID)")
+    for os_window in data:
+        for tab in os_window.get("tabs", []):
+            current_tab_id = str(tab.get("id", ""))
+            if same_tab and current_tab_id != tab_id:
+                continue
+            for win in tab.get("windows", []):
+                win_id = str(win.get("id", ""))
+                title = str(win.get("title", ""))
+                selected.append((win_id, title))
+    return selected
+
+
+def resolve_target(
+    data: list[dict[str, Any]],
+    *,
+    same_tab: bool,
+    title_prefix: str | None,
+    title_contains: str | None,
+) -> str:
+    windows = iter_windows(data, same_tab=same_tab)
+    if title_prefix:
+        needle = unicodedata.normalize("NFKC", title_prefix)
+        for win_id, title in windows:
+            clean = normalized_title(title)
+            if title.startswith(title_prefix) or clean.startswith(needle):
+                return f"id:{win_id}"
+        die(f"no kitty window title starts with: {title_prefix} (try --list-titles)")
+    if title_contains:
+        needle = unicodedata.normalize("NFKC", title_contains)
+        for win_id, title in windows:
+            clean = normalized_title(title)
+            if needle in clean:
+                return f"id:{win_id}"
+        die(f"no kitty window title contains: {title_contains} (try --list-titles)")
+    die("internal error: missing title matcher")
+
+
+def list_titles(data: list[dict[str, Any]], same_tab: bool) -> None:
+    windows = iter_windows(data, same_tab=same_tab)
+    for win_id, title in windows:
+        print(f"id:{win_id}\ttitle:{title.replace(chr(10), r'\\n')}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Watch a kitty window for matching text. When matched, wait a random "
+            "delay and send a key (default: 1)."
+        )
+    )
+    parser.add_argument("-t", "--target", help="kitty @ match selector, e.g. id:12")
+    parser.add_argument("--title-prefix", help="resolve target window id by title prefix")
+    parser.add_argument("--title-contains", help="resolve target window id by title substring")
+    parser.add_argument(
+        "--same-tab",
+        action="store_true",
+        help="with title matching/listing, only consider current tab",
+    )
+    parser.add_argument(
+        "--list-titles",
+        action="store_true",
+        help="print visible kitty window ids/titles and exit",
+    )
+    parser.add_argument(
+        "-p",
+        "--pattern",
+        default=r"experiencing high demand|keep trying",
+        help="case-insensitive regex to detect",
+    )
+    parser.add_argument("-k", "--key", default="1", help="key to send")
+    parser.add_argument("--send-enter", action="store_true", help="also send Enter")
+    parser.add_argument("--min", dest="min_wait", type=int, default=120, help="minimum wait")
+    parser.add_argument("--max", dest="max_wait", type=int, default=300, help="maximum wait")
+    parser.add_argument("--poll", dest="poll_wait", type=int, default=2, help="poll interval")
+    args = parser.parse_args()
+
+    if args.min_wait < 0 or args.max_wait < 0 or args.poll_wait < 0:
+        die("--min/--max/--poll must be non-negative integers")
+    if args.min_wait > args.max_wait:
+        die("--min must be <= --max")
+    if args.title_prefix and args.title_contains:
+        die("use only one of --title-prefix or --title-contains")
+    if not (args.target or args.title_prefix or args.title_contains or args.list_titles):
+        die("provide --target/--title-prefix/--title-contains (try --help)")
+
+    pattern = re.compile(args.pattern, re.IGNORECASE)
+    data = get_kitty_ls()
+
+    if args.list_titles:
+        list_titles(data, same_tab=args.same_tab)
+        return 0
+
+    target = args.target or resolve_target(
+        data,
+        same_tab=args.same_tab,
+        title_prefix=args.title_prefix,
+        title_contains=args.title_contains,
+    )
+
+    print(f"### watching target '{target}' for pattern: {args.pattern}", file=sys.stderr)
+    print(
+        f"### will send key '{args.key}' after random delay {args.min_wait}-{args.max_wait}s",
+        file=sys.stderr,
+    )
+
+    while True:
+        proc = run_kitty(["get-text", "--match", target, "--extent", "screen"], allow_fail=True)
+        screen = proc.stdout if proc.returncode == 0 else ""
+        if pattern.search(screen):
+            wait_s = random.randint(args.min_wait, args.max_wait)
+            print(f"### match found; waiting {wait_s}s before sending '{args.key}'", file=sys.stderr)
+            time.sleep(wait_s)
+            run_kitty(["send-key", "--match", target, args.key])
+            if args.send_enter:
+                run_kitty(["send-key", "--match", target, "enter"])
+        time.sleep(args.poll_wait)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
