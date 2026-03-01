@@ -101,6 +101,10 @@ def is_rebase_needed(branch, release_branch):
   upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
   return upstream_only_commit != ''
 
+def has_local_only_commits(branch):
+  local_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s/%s..%s" % (upstream_repo, branch, branch))
+  return local_only_commit != ''
+
 def handle_release_branches():
   #print("Release branches are %s" % branches)
   for relbranch in release_branches:
@@ -115,6 +119,10 @@ def handle_release_branches():
     else:
       #print("Branch %s hasn't changed upstream" % branch)
       pass
+
+    if has_local_only_commits(relbranch):
+      print("Release branch %s has local commits not in upstream, aborting" % relbranch)
+      sys.exit(3)
 
     if upstream_repo != ORIGIN_REPO:
       run_git("push -q -f %s %s" % (ORIGIN_REPO, relbranch))
