@@ -1,0 +1,69 @@
+#!/bin/sh
+
+set -eu
+
+usage() {
+  cat <<'USAGE'
+Usage: pr-review-comments [PR_NUMBER]
+
+Fetch pull request review threads via GitHub GraphQL.
+When PR_NUMBER is omitted, the script uses the current branch pull request.
+USAGE
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+pr_number="${1:-}"
+if [ -z "$pr_number" ]; then
+  pr_number="$(gh pr view --json number -q .number)"
+fi
+
+pr_url="$(gh pr view "$pr_number" --json url -q .url)"
+
+case "$pr_url" in
+  https://github.com/*/*/pull/*)
+    owner_repo="$(printf '%s\n' "$pr_url" | sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#')"
+    ;;
+  *)
+    echo "Could not parse owner/repo from PR URL: $pr_url" >&2
+    exit 1
+    ;;
+esac
+
+owner="${owner_repo%%/*}"
+repo="${owner_repo##*/}"
+
+query='query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      number
+      title
+      url
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          comments(first: 50) {
+            nodes {
+              id
+              path
+              line
+              body
+              author { login }
+              createdAt
+              replyTo { id }
+            }
+          }
+        }
+      }
+    }
+  }
+}'
+
+gh api graphql \
+  -F owner="$owner" \
+  -F repo="$repo" \
+  -F number="$pr_number" \
+  -f query="$query"
