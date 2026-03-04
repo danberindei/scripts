@@ -435,9 +435,11 @@ def show_cgroup_processes(cgroup_name, limit=10, file=sys.stdout):
     return False
 
 
-def run_once(args, file=sys.stdout):
+def run_once(args, limit=None, file=sys.stdout):
+    if limit is None:
+        limit = args.limit
     if args.processes:
-        if not show_cgroup_processes(args.processes, args.limit, file=file) and not args.watch:
+        if not show_cgroup_processes(args.processes, limit, file=file) and not args.watch:
             sys.exit(1)
         return
 
@@ -448,8 +450,8 @@ def run_once(args, file=sys.stdout):
         data.sort(key=lambda x: x['memory_bytes'] + (x['swap_bytes'] or 0), reverse=True)
 
     # Apply limit for table output
-    if not args.json and args.limit > 0:
-        data = data[:args.limit]
+    if not args.json and limit > 0:
+        data = data[:limit]
 
     if args.json:
         print_jsonl(data, include_processes=args.include_processes, file=file)
@@ -469,15 +471,26 @@ def main():
 
     try:
         if args.watch:
-            while True:
-                buf = io.StringIO()
-                run_once(args, file=buf)
-                output = buf.getvalue()
-                # Clear screen and move to top (ANSI escape codes)
-                # \033[H: Move cursor to home (top-left)
-                # \033[J: Clear from cursor to end of screen
-                print(f"\033[H\033[J{output}", end="", flush=True)
-                time.sleep(args.interval)
+            # Hide cursor while watching
+            print("\033[?25l", end="", flush=True)
+            try:
+                while True:
+                    buf = io.StringIO()
+                    run_once(args, limit=0, file=buf)
+                    output = buf.getvalue().rstrip('\n')
+                    terminal_height = shutil.get_terminal_size().lines
+                    lines = output.split('\n')
+                    if len(lines) > terminal_height:
+                        lines = lines[:terminal_height]
+                    output = '\n'.join(lines)
+                    # Clear screen and move to top (ANSI escape codes)
+                    # \033[H: Move cursor to home (top-left)
+                    # \033[J: Clear from cursor to end of screen
+                    print(f"\033[H\033[J{output}", end="", flush=True)
+                    time.sleep(args.interval)
+            finally:
+                # Restore cursor
+                print("\033[?25h", flush=True)
         else:
             run_once(args)
     except KeyboardInterrupt:
