@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+def die(msg: str) -> None:
+    print(f"### {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def run_kitty(args: list[str], to: str | None = None) -> subprocess.CompletedProcess[str]:
+    cmd = ["kitty", "@"]
+    if to:
+        cmd.extend(["--to", to])
+    cmd.extend(args)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        detail = f": {stderr}" if stderr else ""
+        target = f" --to {to}" if to else ""
+        die(f"kitty command failed{target}{' '.join([''] + args)}{detail}")
+    return proc
+
+
+def get_kitty_tree(to: str | None = None) -> list[dict]:
+    proc = run_kitty(["ls"], to=to)
+    raw = proc.stdout.strip()
+    if not raw:
+        die("kitty returned empty window data (ensure allow_remote_control is enabled)")
+    try:
+        tree = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        die(f"kitty returned invalid JSON from ls: {exc}")
+    if not isinstance(tree, list):
+        die("unexpected kitty ls JSON shape (expected top-level list)")
+    return tree
+
+
+def get_active_window(tab: dict) -> dict | None:
+    windows = tab.get("windows") or []
+    if not isinstance(windows, list) or not windows:
+        return None
+    for win in windows:
+        if isinstance(win, dict) and win.get("is_active"):
+            return win
+    first = windows[0]
+    return first if isinstance(first, dict) else None
+
+
+def get_window_cmdline(window: dict) -> list[str]:
+    cmdline = window.get("cmdline")
+    if isinstance(cmdline, list):
+        out = [str(part) for part in cmdline if str(part)]
+        if out:
+            return out
+    return []
+
+
+def quote_cmd(parts: list[str]) -> str:
+    return shlex.join(parts)
+
+
+def build_session_from_tree(tree: list[dict]) -> str:
+    lines: list[str] = []
+    for os_idx, os_window in enumerate(tree):
+        tabs = os_window.get("tabs") if isinstance(os_window, dict) else None
+        if not isinstance(tabs, list):
+            continue
+        if os_idx > 0:
+            lines.extend(["", "new_os_window", ""])
+        for tab_idx, tab in enumerate(tabs):
+            if tab_idx > 0:
+                lines.extend(["", "new_tab"])
+            else:
+                lines.append("new_tab")
+
+            if isinstance(tab, dict):
+                layout = tab.get("layout")
+                if isinstance(layout, str) and layout:
+                    lines.append(f"layout {layout}")
+                enabled_layouts = tab.get("enabled_layouts")
+                if isinstance(enabled_layouts, list) and enabled_layouts:
+                    layouts = ",".join(str(v) for v in enabled_layouts if str(v))
+                    if layouts:
+                        lines.append(f"enabled_layouts {layouts}")
+
+                active_window = get_active_window(tab)
+                if active_window:
+                    cwd = active_window.get("cwd")
+                    if isinstance(cwd, str) and cwd:
+                        lines.append(f"cd {cwd}")
+
+                windows = tab.get("windows")
+                if isinstance(windows, list) and windows:
+                    for win in windows:
+                        if not isinstance(win, dict):
+                            continue
+                        cmd = get_window_cmdline(win)
+                        lines.append("launch" if not cmd else f"launch {quote_cmd(cmd)}")
+                else:
+                    lines.append("launch")
+            else:
+                lines.append("launch")
+    session = "\n".join(lines).strip()
+    if not session:
+        die("no windows/tabs found in kitty ls JSON")
+    return session
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Save current kitty windows/tabs as a kitty session file."
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="~/.config/kitty/last.session",
+        help="output session path (default: ~/.config/kitty/last.session)",
+    )
+    parser.add_argument(
+        "--stdout",
+        action="store_true",
+        help="print session content to stdout instead of writing a file",
+    )
+    parser.add_argument(
+        "--to",
+        help="kitty remote-control address (same as kitty @ --to ...)",
+    )
+    args = parser.parse_args()
+
+    tree = get_kitty_tree(to=args.to)
+    session = build_session_from_tree(tree)
+    header = f"# Saved by kitty-save-session on {datetime.now().isoformat(timespec='seconds')}"
+    content = f"{header}\n{session}\n"
+
+    if args.stdout:
+        print(content, end="")
+        return 0
+
+    out = Path(os.path.expanduser(args.output))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(content, encoding="utf-8")
+    print(f"saved kitty session to {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
