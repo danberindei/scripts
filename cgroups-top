@@ -73,6 +73,75 @@ def get_proc_memory(pid):
         return {'rss_bytes': 0, 'file_bytes': 0, 'anon_bytes': 0, 'swap_bytes': 0, 'shmem_bytes': 0}
 
 
+def get_meminfo():
+    """Parse /proc/meminfo into a dict of name -> kB."""
+    info = {}
+    for line in Path("/proc/meminfo").read_text().split('\n'):
+        parts = line.split()
+        if len(parts) >= 2:
+            key = parts[0].rstrip(':')
+            try:
+                info[key] = int(parts[1])
+            except ValueError:
+                pass
+    return info
+
+
+def get_tmpfs_usage():
+    """Get total bytes used across all tmpfs mounts."""
+    total_used = 0
+    seen = set()
+    try:
+        for line in Path("/proc/mounts").read_text().split('\n'):
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] == 'tmpfs':
+                mountpoint = parts[1]
+                if mountpoint in seen:
+                    continue
+                seen.add(mountpoint)
+                try:
+                    stat = os.statvfs(mountpoint)
+                    total_used += (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+                except (PermissionError, OSError):
+                    pass
+    except (FileNotFoundError, PermissionError):
+        pass
+    return total_used
+
+
+def get_synthetic_entries():
+    """Return synthetic entries for free memory+swap and tmpfs."""
+    meminfo = get_meminfo()
+    free_mem = meminfo.get('MemFree', 0) * 1024
+    free_swap = meminfo.get('SwapFree', 0) * 1024
+    tmpfs_used = get_tmpfs_usage()
+
+    return [
+        {
+            'memory_bytes': free_mem,
+            'swap_bytes': free_swap,
+            'shmem_bytes': 0,
+            'root_pid': None,
+            'service': '[free]',
+            'executables': [],
+            'processes': [],
+            'cgroup_path': '',
+            'pids': [],
+        },
+        {
+            'memory_bytes': tmpfs_used,
+            'swap_bytes': None,
+            'shmem_bytes': None,
+            'root_pid': None,
+            'service': '[tmpfs]',
+            'executables': [],
+            'processes': [],
+            'cgroup_path': '',
+            'pids': [],
+        },
+    ]
+
+
 def collect_cgroup_data():
     """Collect cgroup memory and process data."""
     results = []
@@ -103,6 +172,9 @@ def collect_cgroup_data():
             memory_bytes = int(memory_file.read_text().strip())
             # Don't include inactive file cache in the cgroup total
             memory_bytes -= inactive_file_bytes
+            # Note: shmem_bytes is not subtracted here; it's counted both in this cgroup's
+            # total and in the synthetic [tmpfs] entry, which is intentional so per-cgroup
+            # shmem usage remains visible.
 
             swap_bytes = int(swap_file.read_text().strip()) if swap_file.exists() else 0
 
@@ -156,7 +228,7 @@ def collect_cgroup_data():
 
     # Sort by total memory usage (memory + swap)
     # memory_bytes already includes shmem
-    results.sort(key=lambda x: x['memory_bytes'] + x['swap_bytes'], reverse=True)
+    results.sort(key=lambda x: x['memory_bytes'] + (x['swap_bytes'] or 0), reverse=True)
     return results
 
 
@@ -178,7 +250,7 @@ def print_cgroups_table(data, file=sys.stdout):
     is_tty, terminal_width = get_terminal_width()
 
     # Calculate max widths
-    max_pid_width = max(len(str(row['root_pid'])) for row in data)
+    max_pid_width = max(len(str(row['root_pid'])) if row['root_pid'] is not None else 0 for row in data)
 
     # Print header
     print(f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables (Mem)'}", file=file)
@@ -196,12 +268,12 @@ def print_cgroups_table(data, file=sys.stdout):
 
     for row in data:
         # memory_bytes already includes shmem
-        total_bytes = row['memory_bytes'] + row['swap_bytes']
+        total_bytes = row['memory_bytes'] + (row['swap_bytes'] or 0)
         total_str = human_size(total_bytes)
-        memory_str = human_size(row['memory_bytes'])
-        shmem_str = human_size(row['shmem_bytes'])
-        swap_str = human_size(row['swap_bytes'])
-        pid_str = str(row['root_pid'])
+        memory_str = human_size(row['memory_bytes']) if row['shmem_bytes'] is not None else ''
+        shmem_str = human_size(row['shmem_bytes']) if row['shmem_bytes'] is not None else ''
+        swap_str = human_size(row['swap_bytes']) if row['swap_bytes'] is not None else ''
+        pid_str = str(row['root_pid']) if row['root_pid'] is not None else ''
         service = row['service']
 
         # Aggregate memory per executable name (prefer /proc/<pid>/comm).
@@ -370,6 +442,10 @@ def run_once(args, file=sys.stdout):
         return
 
     data = collect_cgroup_data()
+
+    if not args.json and not args.processes:
+        data = data + get_synthetic_entries()
+        data.sort(key=lambda x: x['memory_bytes'] + (x['swap_bytes'] or 0), reverse=True)
 
     # Apply limit for table output
     if not args.json and args.limit > 0:
