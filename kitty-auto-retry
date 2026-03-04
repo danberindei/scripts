@@ -142,8 +142,8 @@ def main() -> int:
     )
     parser.add_argument("-k", "--key", default="1", help="key to send")
     parser.add_argument("--send-enter", action="store_true", help="also send Enter")
-    parser.add_argument("--min", dest="min_wait", type=int, default=120, help="minimum wait")
-    parser.add_argument("--max", dest="max_wait", type=int, default=300, help="maximum wait")
+    parser.add_argument("--min", dest="min_wait", type=int, default=20, help="minimum wait")
+    parser.add_argument("--max", dest="max_wait", type=int, default=200, help="maximum wait")
     parser.add_argument("--poll", dest="poll_wait", type=int, default=2, help="poll interval")
     args = parser.parse_args()
 
