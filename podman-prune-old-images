@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: podman-prune-old-images [--apply]
+
+Keep only the newest podman image per repository.
+Default mode is dry-run (prints what would be removed).
+
+Options:
+  --apply   Remove old image tags instead of only printing them
+  -h, --help  Show this help
+EOF
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'Missing required command: %s\n' "$1" >&2
+    exit 1
+  fi
+}
+
+apply=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --apply)
+      apply=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unknown option: %s\n\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+require_cmd podman
+require_cmd jq
+
+short_id() {
+  local raw="$1"
+  raw="${raw#sha256:}"
+  printf '%s' "${raw:0:12}"
+}
+
+selection_filter='
+  [
+    .[] as $img
+    | ($img.Names // [])[]
+    | capture("^(?<repo>.+):(?<tag>[^:]+)$")? as $name
+    | select($name != null)
+    | select($name.repo != "<none>" and $name.tag != "<none>")
+    | {
+        repo: $name.repo,
+        tag: $name.tag,
+        id: $img.Id,
+        created: ($img.Created // 0),
+        created_at: $img.CreatedAt
+      }
+  ]
+  | unique_by([.repo, .tag, .id])
+  | group_by(.repo)[]
+  | select(length > 1)
+  | sort_by(.created)
+  | .[:-1][]
+  | [.repo, .tag, .id, .created_at]
+  | @tsv
+'
+
+tmp_file="$(mktemp)"
+trap 'rm -f "$tmp_file"' EXIT
+
+podman images --format json \
+  | jq -r "$selection_filter" > "$tmp_file"
+
+if [ ! -s "$tmp_file" ]; then
+  printf 'No old images found. Nothing to do.\n'
+  exit 0
+fi
+
+if [ "$apply" -eq 0 ]; then
+  printf 'Dry run. Old image tags that would be removed:\n'
+  while IFS="$(printf '\t')" read -r repo tag id created_at; do
+    printf '%s:%s\t%s\t%s\n' "$repo" "$tag" "$(short_id "$id")" "$created_at"
+  done < "$tmp_file"
+  printf '\nRun with --apply to remove them.\n'
+  exit 0
+fi
+
+printf 'Removing old image tags:\n'
+while IFS="$(printf '\t')" read -r repo tag id created_at; do
+  ref="${repo}:${tag}"
+  printf '  %s (%s)\n' "$ref" "$(short_id "$id")"
+  podman rmi "$ref"
+done < "$tmp_file"
+
+printf 'Done.\n'
