@@ -18,6 +18,7 @@ HINT_PATTERN = re.compile(
 )
 
 LINE_NUM_RE = re.compile(r':\d+$')
+MIN_MATCH_LEN = 6
 
 
 def build_color_map(ansi_text):
@@ -101,12 +102,12 @@ def mark(text, args, Mark, extra_cli_args, *a):
         search_text, color_map = build_color_map(ansi_text)
 
     # Collect matches from both texts in parallel — same strings, same order
-    text_matches = [m for m in HINT_PATTERN.finditer(text) if len(m.group()) >= 8]
+    text_matches = [m for m in HINT_PATTERN.finditer(text) if len(m.group()) >= MIN_MATCH_LEN]
 
     if color_map is None:
         search_matches = [None] * len(text_matches)
     else:
-        search_matches = [m for m in HINT_PATTERN.finditer(search_text) if len(m.group()) >= 8]
+        search_matches = [m for m in HINT_PATTERN.finditer(search_text) if len(m.group()) >= MIN_MATCH_LEN]
 
     marks = []
     idx = 0
@@ -118,10 +119,10 @@ def mark(text, args, Mark, extra_cli_args, *a):
             # All chars must be colored
             if not (e <= len(color_map) and all(color_map[s:e])):
                 continue
-            # Color must start and end at exact match boundaries
-            if s > 0 and color_map[s - 1]:
+            # Color must start and end at exact match boundaries (ignore whitespace)
+            if s > 0 and color_map[s - 1] and not search_text[s - 1].isspace():
                 continue
-            if e < len(color_map) and color_map[e]:
+            if e < len(color_map) and color_map[e] and not search_text[e].isspace():
                 continue
         marks.append(Mark(idx, tm.start(), tm.end(), match_text, {}))
         idx += 1
