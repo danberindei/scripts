@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""
+Claude Code PreToolUse hook: warn when free context drops below 50%.
+
+Blocks once per "dip" — resets if context recovers above 50%.
+State is stored per session in /tmp/claude_ctx_warn_<session_id>.
+"""
+
+import json
+import os
+import sys
+
+THRESHOLD = 0.50
+
+data = json.load(sys.stdin)
+
+ctx = data.get("context_window")
+if not ctx:
+    sys.exit(0)
+
+tokens_used = ctx.get("tokens_used", 0)
+tokens_total = ctx.get("tokens_total", 1)
+free_fraction = 1.0 - (tokens_used / tokens_total)
+
+session_id = data.get("session_id", "unknown")
+project_slug = os.getcwd().replace("/", "-")
+state_dir = os.path.expanduser(f"~/.claude/projects/{project_slug}")
+os.makedirs(state_dir, exist_ok=True)
+state_file = os.path.join(state_dir, f"ctx_warn_{session_id}")
+
+if free_fraction >= THRESHOLD:
+    # Context recovered — remove warned flag so next dip triggers again
+    if os.path.exists(state_file):
+        os.remove(state_file)
+    sys.exit(0)
+
+# Below threshold
+if os.path.exists(state_file):
+    # Already warned this dip — let the user continue
+    sys.exit(0)
+
+# First time crossing below threshold — block and warn
+with open(state_file, "w") as f:
+    f.write("warned")
+
+free_pct = int(free_fraction * 100)
+used_pct = 100 - free_pct
+print(json.dumps({
+    "decision": "block",
+    "reason": (
+        f"Context is {free_pct}% free ({used_pct}% used, {tokens_used:,}/{tokens_total:,} tokens). "
+        "Send any message to continue despite low context."
+    ),
+}))
