@@ -39,12 +39,17 @@ if [[ $# -lt 1 ]]; then
 fi
 
 ref="$1"
-file="${ref%:*}"
-line="${ref##*:}"
+if [[ "$ref" =~ :[0-9]+$ ]]; then
+  file="${ref%:*}"
+  line="${ref##*:}"
+else
+  file="$ref"
+  line=""
+fi
 debug "input_ref=$ref"
 
-if [[ -z "$file" || -z "$line" || "$file" == "$ref" || ! "$line" =~ ^[0-9]+$ ]]; then
-  echo "invalid reference: $ref (expected path/to/file.ext:line)" >&2
+if [[ -z "$file" || ( -n "$line" && ! "$line" =~ ^[0-9]+$ ) ]]; then
+  echo "invalid reference: $ref (expected path/to/file.ext or path/to/file.ext:line)" >&2
   exit 2
 fi
 
@@ -111,9 +116,9 @@ fi
 debug "idea_bin=idea"
 
 if [[ -n "${project_dir:-}" ]]; then
-  idea "$project_dir" --line "$line" "$file" &
+  idea "$project_dir" ${line:+--line "$line"} "$file" &
 else
-  idea --line "$line" "$file" &
+  idea ${line:+--line "$line"} "$file" &
 fi
 idea_cli_pid=$!
 wait "$idea_cli_pid"
