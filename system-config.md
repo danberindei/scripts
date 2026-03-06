@@ -38,18 +38,40 @@ Current defaults (Fedora Asahi):
 echo 10 > /sys/module/zswap/parameters/max_pool_percent
 
 # Reduce swappiness to make kernel less eager to swap out (runtime)
-sysctl vm.swappiness=10
+sysctl vm.swappiness=20
 ```
 
-To persist across reboots:
+## Persistent system config files
 
+Current persistent settings are tracked in these files:
+
+`/etc/modprobe.d/zswap.conf`
 ```
-# /etc/sysctl.d/99-swap.conf
-vm.swappiness=10
-
-# /etc/modprobe.d/zswap.conf
 options zswap max_pool_percent=10
 ```
+Boot-time zswap module parameters; `max_pool_percent=10` limits compressed swap cache usage in RAM.
+
+`/etc/sysctl.d/31-swappiness.conf`
+```
+vm.swappiness = 20
+```
+Persistent VM tuning; `vm.swappiness = 20` reduces how eagerly the kernel swaps compared to higher defaults.
+
+`/etc/systemd/logind.conf`
+```
+[Login]
+HandlePowerKey=suspend
+HandlePowerKeyLongPress=poweroff
+HandleSuspendKey=ignore
+```
+`systemd-logind` power policy; power key suspends, long press powers off, suspend key is ignored.
+
+`/etc/systemd/system/tmp.mount.d/override.conf`
+```
+[Mount]
+Options=mode=1777,relatime,size=8G
+```
+`tmp.mount` drop-in override; keeps `/tmp` as tmpfs with size 8G instead of the default 16G.
 
 ## Notes
 
@@ -94,12 +116,5 @@ sudo systemctl daemon-reload
 sudo systemctl restart tmp.mount
 ```
 
-Alternative via /etc/fstab (reboot or mount -a):
-
-```
-tmpfs /tmp tmpfs defaults,size=8G,mode=1777 0 0
-sudo mount -a
-```
 
 Warning: Shrinking /tmp below its current usage will cause writes to fail; ensure /tmp usage is below the new size before remounting or free files in /tmp.
-
