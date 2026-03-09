@@ -28,25 +28,29 @@ if [[ -n"$(git status --porcelain --untracked-files=no)" ]]; then
 	git stash save "remove_integrated_topic_branches backup"
 fi
 
-for tb in $(git_ls_branches $TOPIC_BRANCH_PREFIX) ; do
-  rb=$(find_upstream_branch $tb)
-  # Checkout could fail because the branch is checked out in another worktree
-  if git switch -q $tb ; then
-    # The rebase could fail because it has conflicts
-    git rebase $rb $tb &>/dev/null || git rebase --abort
-    tb_head=$(git rev-parse "$tb")
-    rb_head=$(git rev-parse "$rb")
-    if [[ "$tb_head" == "$rb_head" ]] || git merge-base --is-ancestor $tb $rb ; then
-      echo Removing topic branch $tb merged in $rb
-      git checkout -q $rb
-      git branch --set-upstream-to=$rb $tb
-      git branch -d $tb
-      git push origin :$tb || true
-      if [[ "$SAVED_BRANCH" == "$tb" ]]; then
-        SAVED_BRANCH=$rb
+TOPIC_BRANCH_PREFIXES=($TOPIC_BRANCH_PREFIX)
+
+for prefix in "${TOPIC_BRANCH_PREFIXES[@]}"; do
+  for tb in $(git_ls_branches $prefix) ; do
+    rb=$(find_upstream_branch $tb)
+    # Checkout could fail because the branch is checked out in another worktree
+    if git switch -q $tb ; then
+      # The rebase could fail because it has conflicts
+      git rebase $rb $tb &>/dev/null || git rebase --abort
+      tb_head=$(git rev-parse "$tb")
+      rb_head=$(git rev-parse "$rb")
+      if [[ "$tb_head" == "$rb_head" ]] || git merge-base --is-ancestor $tb $rb ; then
+        echo Removing topic branch $tb merged in $rb
+        git checkout -q $rb
+        git branch --set-upstream-to=$rb $tb
+        git branch -d $tb
+        git push origin :$tb || true
+        if [[ "$SAVED_BRANCH" == "$tb" ]]; then
+          SAVED_BRANCH=$rb
+        fi
       fi
     fi
-  fi
+  done
 done
 
 for tb in $(git_ls_branches $PR_BRANCH_PREFIX) ; do
@@ -81,10 +85,13 @@ fi
 
 
 echo Topic branches not integrated yet:
-echo $(git_ls_branches $TOPIC_BRANCH_PREFIX | tr -d '*')
+for prefix in "${TOPIC_BRANCH_PREFIXES[@]}"; do
+  git_ls_branches $prefix | tr -d '*'
+done
 echo
 echo PR branches not integrated yet:
 echo $(git_ls_branches $PR_BRANCH_PREFIX | tr -d '*')
 echo
 echo Other branches:
-echo $(git_ls_branches | grep -v "^\($TOPIC_BRANCH_PREFIX\|$PR_BRANCH_PREFIX\)")
+TOPIC_PREFIX_PATTERN=$(IFS='|'; echo "${TOPIC_BRANCH_PREFIXES[*]}")
+echo $(git_ls_branches | grep -Ev "^($TOPIC_PREFIX_PATTERN|$PR_BRANCH_PREFIX)")

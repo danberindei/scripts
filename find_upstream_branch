@@ -19,8 +19,6 @@ import subprocess
 import getopt
 
 
-# Configuration: The following variables need to be set.
-TOPIC_BRANCH_PREFIX="t_" # All branches whose name starts with this will be rebased against their updated branch point
 GIT="git" # Path to the git binary executable
 
 # The following variables need to be set in the git config:
@@ -29,6 +27,7 @@ GIT="git" # Path to the git binary executable
 
 upstream_repo = None
 rel_branches = None
+topic_branch_prefixes = None
 branch = None
 
 def run_git(opts):
@@ -56,9 +55,14 @@ def find_rel_branches():
     print("Can't find any release branches! Make sure you have configured sync.releaseBranches in this repository.", file=sys.stderr)
     exit(1)
 
+def find_topic_branch_prefixes():
+  prefixes = run_git("config sync.topicBranchPrefix").split()
+  return prefixes if prefixes else ["t_"]
+
 def parse_args():
   global upstream_repo
   global rel_branches
+  global topic_branch_prefixes
   global branch
 
   try:
@@ -83,6 +87,7 @@ def parse_args():
 
   if upstream_repo == None: upstream_repo = find_upstream_repo()
   if rel_branches == None: rel_branches = find_rel_branches()
+  topic_branch_prefixes = find_topic_branch_prefixes()
 
   if (len(args) > 0): branch = args[0]
 
@@ -101,7 +106,7 @@ def find_upstream_branch():
   min_commits = 1000
   base_branch = "no_such_base_branch"
   for relbranch in rel_branches:
-    if not relbranch.startswith(TOPIC_BRANCH_PREFIX):
+    if not any(relbranch.startswith(p) for p in topic_branch_prefixes):
       commits = len(run_git("--no-pager log --pretty=oneline -n %d %s..%s" % (min_commits + 1, relbranch, branch)).split("\n"))
       if commits < min_commits:
         min_commits = commits

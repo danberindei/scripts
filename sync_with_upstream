@@ -134,7 +134,7 @@ def handle_topics():
   print("Release branches are %s" % release_branches)
   ## Now handle topic branches.
   b = run_git("for-each-ref --format=%(refname:short) refs/heads/**")
-  topic_branches = [tb for tb in b.splitlines() if tb.startswith(topic_branch_prefix)]
+  topic_branches = [tb for tb in b.splitlines() if any(tb.startswith(p) for p in topic_branch_prefix)]
   print("Branches are %s " % topic_branches)
 
   base_branches = dict()
@@ -255,9 +255,9 @@ def parse_args():
     sys.exit(1)
 
   try:
-    topic_branch_prefix = run_git("config get %s" % CONFIG_TOPIC_BRANCH_PREFIX).strip()
+    topic_branch_prefix = run_git("config get %s" % CONFIG_TOPIC_BRANCH_PREFIX).split()
   except Exception:
-    topic_branch_prefix = DEFAULT_TOPIC_BRANCH_PREFIX
+    topic_branch_prefix = [DEFAULT_TOPIC_BRANCH_PREFIX]
 
 def usage():
   print("usage: ", sys.argv[0],"[-u <upstream repo>] [-b <comma separated branches>] [-p]")
@@ -267,7 +267,7 @@ def main():
   init()
   handle_release_branches()
   print("Local release branches %s synced with %s" % (release_branches, upstream_repo))
-  print("Now rebasing all topic branches that start with '%s'" % topic_branch_prefix)
+  print("Now rebasing all topic branches that start with %s" % topic_branch_prefix)
   handle_topics()
   finish()
 
