@@ -1,0 +1,6 @@
+#!/bin/sh
+email=$(git config user.email 2>/dev/null)
+if [ -z "$email" ]; then
+  echo "ERROR: git user.email is not configured"
+  exit 1
+fi

@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""
+Codex notify hook: block once per low-context dip at 50% free context.
+
+This runs from Codex's `notify` hook on `agent-turn-complete`, reads the
+session's latest token_count event, and prompts on /dev/tty when free context
+drops below the threshold. The prompt resets after context recovers.
+"""
+
+import glob
+import json
+import os
+import sys
+from pathlib import Path
+
+THRESHOLD = 0.50
+
+
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex")))
+
+
+def load_notification() -> dict:
+    if len(sys.argv) < 2:
+        return {}
+    try:
+        return json.loads(sys.argv[1])
+    except json.JSONDecodeError:
+        return {}
+
+
+def find_session_file(home: Path, thread_id: str) -> Path | None:
+    pattern = str(home / "sessions" / "*" / "*" / "*" / f"rollout-*{thread_id}.jsonl")
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        return None
+    return Path(matches[-1])
+
+
+def latest_context_window(session_file: Path) -> tuple[int, int] | None:
+    total_tokens = None
+    model_context_window = None
+
+    with session_file.open() as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            payload = event.get("payload", {})
+            if event.get("type") != "event_msg" or payload.get("type") != "token_count":
+                continue
+
+            info = payload.get("info", {})
+            usage = info.get("total_token_usage", {})
+            total = usage.get("total_tokens")
+            window = info.get("model_context_window")
+            if isinstance(total, int) and isinstance(window, int) and window > 0:
+                total_tokens = total
+                model_context_window = window
+
+    if total_tokens is None or model_context_window is None:
+        return None
+
+    return total_tokens, model_context_window
+
+
+def state_file(home: Path, thread_id: str) -> Path:
+    state_dir = home / "context-guards"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir / f"ctx_warn_{thread_id}"
+
+
+def clear_state(path: Path) -> None:
+    if path.exists():
+        path.unlink()
+
+
+def block_on_tty(message: str) -> None:
+    try:
+        with open("/dev/tty", "r+", encoding="utf-8", errors="replace") as tty:
+            tty.write(f"\n\a{message}\n")
+            tty.write("Press Enter to continue.\n")
+            tty.flush()
+            tty.readline()
+    except OSError:
+        print(message, file=sys.stderr)
+
+
+def main() -> int:
+    notification = load_notification()
+    if notification.get("type") != "agent-turn-complete":
+        return 0
+
+    thread_id = notification.get("thread-id")
+    if not thread_id:
+        return 0
+
+    home = codex_home()
+    session_file = find_session_file(home, thread_id)
+    if session_file is None:
+        return 0
+
+    context_window = latest_context_window(session_file)
+    if context_window is None:
+        return 0
+
+    total_tokens, model_context_window = context_window
+    free_fraction = max(0.0, 1.0 - (total_tokens / model_context_window))
+    guard_state = state_file(home, thread_id)
+
+    if free_fraction >= THRESHOLD:
+        clear_state(guard_state)
+        return 0
+
+    if guard_state.exists():
+        return 0
+
+    guard_state.write_text("warned", encoding="utf-8")
+
+    free_pct = int(free_fraction * 100)
+    used_pct = 100 - free_pct
+    block_on_tty(
+        "Codex context warning: "
+        f"{free_pct}% free ({used_pct}% used, {total_tokens:,}/{model_context_window:,} tokens). "
+        "Continue only if you want to keep working in this session."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
