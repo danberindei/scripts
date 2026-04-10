@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -42,17 +43,6 @@ def get_kitty_tree(to: str | None = None) -> list[dict]:
     return tree
 
 
-def get_active_window(tab: dict) -> dict | None:
-    windows = tab.get("windows") or []
-    if not isinstance(windows, list) or not windows:
-        return None
-    for win in windows:
-        if isinstance(win, dict) and win.get("is_active"):
-            return win
-    first = windows[0]
-    return first if isinstance(first, dict) else None
-
-
 def get_window_cmdline(window: dict) -> list[str]:
     cmdline = window.get("cmdline")
     if isinstance(cmdline, list):
@@ -60,6 +50,13 @@ def get_window_cmdline(window: dict) -> list[str]:
         if out:
             return out
     return []
+
+
+def get_window_cwd(window: dict) -> str | None:
+    cwd = window.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        return cwd
+    return None
 
 
 def quote_cmd(parts: list[str]) -> str:
@@ -90,17 +87,14 @@ def build_session_from_tree(tree: list[dict]) -> str:
                     if layouts:
                         lines.append(f"enabled_layouts {layouts}")
 
-                active_window = get_active_window(tab)
-                if active_window:
-                    cwd = active_window.get("cwd")
-                    if isinstance(cwd, str) and cwd:
-                        lines.append(f"cd {cwd}")
-
                 windows = tab.get("windows")
                 if isinstance(windows, list) and windows:
                     for win in windows:
                         if not isinstance(win, dict):
                             continue
+                        cwd = get_window_cwd(win)
+                        if cwd:
+                            lines.append(f"cd {cwd}")
                         cmd = get_window_cmdline(win)
                         lines.append("launch" if not cmd else f"launch {quote_cmd(cmd)}")
                 else:
@@ -145,8 +139,14 @@ def main() -> int:
 
     out = Path(os.path.expanduser(args.output))
     out.parent.mkdir(parents=True, exist_ok=True)
+    backup = out.with_name(f"{out.name}.bak")
+    if out.exists():
+        shutil.copy2(out, backup)
     out.write_text(content, encoding="utf-8")
-    print(f"saved kitty session to {out}")
+    if backup.exists():
+        print(f"saved kitty session to {out} (backup: {backup})")
+    else:
+        print(f"saved kitty session to {out}")
     return 0
 
 
