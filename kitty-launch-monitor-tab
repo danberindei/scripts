@@ -1,0 +1,6 @@
+#!/usr/bin/fish
+
+set win $(kitty @ launch --type=tab atop)
+kitty @ goto-layout --match "id:$win" fat
+kitty @ launch --match "id:$win" cgroups-top --watch
+kitty @ resize-window --match "id:$win" --axis vertical --increment $(math -s0 $(tput lines) x 20 / 100)

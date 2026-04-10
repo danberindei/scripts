@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Debug why laptop doesn't sleep on lid close
+
+echo "=== logind lid config ==="
+systemd-analyze cat-config systemd/logind.conf | grep -i lid
+
+echo ""
+echo "=== active inhibitors ==="
+systemd-inhibit --list
+
+echo ""
+echo "=== GNOME power settings ==="
+gsettings get org.gnome.settings-daemon.plugins.power lid-close-ac-action 2>/dev/null || echo "(no gnome power daemon)"
+gsettings get org.gnome.settings-daemon.plugins.power lid-close-battery-action 2>/dev/null
+gsettings get org.gnome.settings-daemon.plugins.power lid-close-suspend-with-external-monitor 2>/dev/null
+
+echo ""
+echo "=== GNOME session inhibitors ==="
+dbus-send --print-reply \
+  --dest=org.gnome.SessionManager \
+  /org/gnome/SessionManager \
+  org.gnome.SessionManager.GetInhibitors 2>/dev/null \
+| grep -o 'string "[^"]*"' \
+| sed 's/string "//;s/"//'
+
+echo ""
+echo "=== logind lid events (last 30 min) ==="
+journalctl -b0 -u systemd-logind --since "30 min ago" | grep -i "lid\|suspend\|inhibit" | tail -30
+
+echo ""
+echo "=== lid input device ==="
+grep -r "" /sys/class/input/*/name 2>/dev/null | grep -i lid
+
+echo ""
+echo "=== xrandr external monitors ==="
+xrandr --listmonitors 2>/dev/null || echo "(no xrandr / not X11)"
