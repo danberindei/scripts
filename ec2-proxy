@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+instance_id=$1
+port=$2
+
+ip=$(aws ec2 describe-instances \
+  --instance-ids "$instance_id" \
+  --query "Reservations[0].Instances[0].PublicIpAddress" \
+  --output text)
+
+if [[ -z "$ip" || "$ip" == "None" ]]; then
+  echo "No public IP found for instance $instance_id" >&2
+  exit 1
+fi
+
+exec nc "$ip" "$port"
