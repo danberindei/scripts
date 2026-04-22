@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+
+import sys
+
+from idea_http import print_json, request_json
+
+
+USAGE = """Usage: idea-task <command>
+Commands:
+  list
+  open <id> <changelist>
+  close"""
+
+
+def usage() -> None:
+    print(USAGE, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        usage()
+
+    command = argv[1]
+
+    try:
+        if command == "list":
+            print_json(request_json("GET", "/tasks"))
+            return 0
+        if command == "open" and len(argv) == 4:
+            request_json("POST", "/tasks/open", {"id": argv[2], "changelist": argv[3]})
+            print()
+            return 0
+        if command == "close" and len(argv) == 2:
+            request_json("POST", "/tasks/close")
+            print()
+            return 0
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    usage()
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from idea_http import request_json
+
+
+USAGE = """Usage: jira-start <ISSUE-KEY>
+  Creates or reuses a git branch, IDEA task, and IDEA changelist for a Jira issue"""
+
+
+def usage(exit_code: int = 1) -> None:
+    stream = sys.stdout if exit_code == 0 else sys.stderr
+    print(USAGE, file=stream)
+    raise SystemExit(exit_code)
+
+
+def fatal(message: str) -> int:
+    print(message, file=sys.stderr)
+    return 1
+
+
+def run_command(args: list[str], *, capture_output: bool = True, check: bool = True):
+    try:
+        return subprocess.run(
+            args,
+            check=check,
+            text=True,
+            capture_output=capture_output,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"command not found: {args[0]}") from exc
+
+
+def command_output(args: list[str]) -> str:
+    return run_command(args).stdout
+
+
+def optional_json(method: str, endpoint: str):
+    try:
+        return request_json(method, endpoint)
+    except Exception:
+        return None
+
+
+def optional_json_for_path(method: str, endpoint: str, project_path: str):
+    try:
+        return request_json(method, endpoint, project_path=project_path)
+    except Exception:
+        return None
+
+
+def jira_summary(issue: str) -> str:
+    payload = json.loads(command_output(["jira", "issue", "view", issue, "--raw"]))
+    return payload["fields"]["summary"]
+
+
+def copilot_text(issue: str, summary: str) -> str:
+    prompt = (
+        f"Jira issue: {issue}\n"
+        f"Summary: {summary}\n\n"
+        "Output EXACTLY two lines, nothing else:\n"
+        "Line 1: A short branch name slug (3-5 lowercase words separated by underscores, no hyphens, no punctuation)\n"
+        "Line 2: A concise one-line description of the work to be done"
+    )
+    result = run_command(
+        [
+            "copilot",
+            "--model",
+            "gpt-5-mini",
+            "--output-format",
+            "json",
+            "--no-ask-user",
+            "-p",
+            prompt,
+        ]
+    )
+
+    parts: list[str] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        message = json.loads(line)
+        if message.get("type") != "assistant.message":
+            continue
+        content = message.get("data", {}).get("content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+
+    text = "".join(parts)
+    if not text:
+        raise RuntimeError("copilot returned no assistant message content")
+    return text
+
+
+def slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9_]", "", text.lower())
+    if not slug:
+        raise RuntimeError("copilot returned an empty branch slug")
+    return slug
+
+
+def find_named_objects(value, field: str, expected: str) -> bool:
+    if isinstance(value, dict):
+        if value.get(field) == expected:
+            return True
+        return any(find_named_objects(item, field, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(find_named_objects(item, field, expected) for item in value)
+    return False
+
+
+def note_failed_step(label: str, exc: Exception) -> None:
+    print(f"Note: {label}", file=sys.stderr)
+    message = str(exc).strip()
+    if message:
+        print(message, file=sys.stderr)
+
+
+def list_local_branches() -> list[str]:
+    output = command_output(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"])
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def matching_issue_branch(issue: str) -> str | None:
+    current = command_output(["git", "branch", "--show-current"]).strip()
+    if current.startswith(f"{issue}_"):
+        return current
+
+    matches = sorted(branch for branch in list_local_branches() if branch.startswith(f"{issue}_"))
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def ensure_branch(branch: str) -> str:
+    current = command_output(["git", "branch", "--show-current"]).strip()
+    if current == branch:
+        print(f"Reusing current branch: {branch}")
+        return branch
+
+    exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).returncode == 0
+
+    if exists:
+        run_command(["git", "checkout", branch], capture_output=False)
+        print(f"Reusing existing branch: {branch}")
+        return branch
+
+    run_command(["git", "checkout", "-b", branch], capture_output=False)
+    return branch
+
+
+def find_issue_task(tasks, issue: str) -> dict | None:
+    if not isinstance(tasks, list):
+        return None
+
+    prefix = f"{issue} "
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id")
+        summary = task.get("summary")
+        if task_id == issue or summary == issue:
+            return task
+        if isinstance(summary, str) and summary.startswith(prefix):
+            return task
+    return None
+
+
+def find_issue_changelist(changelists, issue: str) -> dict | None:
+    if not isinstance(changelists, list):
+        return None
+
+    matches: list[dict] = []
+    prefix = f"{issue} "
+    for changelist in changelists:
+        if not isinstance(changelist, dict):
+            continue
+        name = changelist.get("name")
+        if name == issue or (isinstance(name, str) and name.startswith(prefix)):
+            matches.append(changelist)
+
+    if not matches:
+        return None
+
+    default_matches = [item for item in matches if item.get("default")]
+    return default_matches[0] if default_matches else matches[0]
+
+
+def candidate_project_paths() -> list[str]:
+    git_root = Path(command_output(["git", "rev-parse", "--show-toplevel"]).strip()).resolve()
+    candidates = [git_root]
+    candidates.extend(candidate for candidate in git_root.parents if (candidate / ".idea").exists())
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        resolved = str(candidate.resolve())
+        if resolved not in seen:
+            seen.add(resolved)
+            ordered.append(resolved)
+    return ordered
+
+
+def project_state_score(tasks, changelists, distance: int) -> tuple[int, int, int, int, int]:
+    task_list = tasks if isinstance(tasks, list) else []
+    changelist_list = changelists if isinstance(changelists, list) else []
+    non_default_tasks = sum(1 for task in task_list if isinstance(task, dict) and task.get("id") != "Default")
+    non_default_changelists = sum(
+        1 for changelist in changelist_list if isinstance(changelist, dict) and changelist.get("name") != "Changes"
+    )
+    return (
+        non_default_tasks,
+        non_default_changelists,
+        len(task_list),
+        len(changelist_list),
+        -distance,
+    )
+
+
+def resolve_project_context() -> tuple[str, object, object]:
+    configured = os.environ.get("IDEA_PROJECT_PATH")
+    if configured:
+        project_path = os.path.realpath(configured)
+        return (
+            project_path,
+            optional_json_for_path("GET", "/tasks", project_path),
+            optional_json_for_path("GET", "/changelists", project_path),
+        )
+
+    candidates = candidate_project_paths()
+    best_path = candidates[0]
+    best_tasks = None
+    best_changelists = None
+    best_score = (-1, -1, -1, -1, 0)
+
+    for distance, candidate in enumerate(candidates):
+        tasks = optional_json_for_path("GET", "/tasks", candidate)
+        changelists = optional_json_for_path("GET", "/changelists", candidate)
+        if tasks is None and changelists is None:
+            continue
+
+        score = project_state_score(tasks, changelists, distance)
+        if score > best_score:
+            best_path = candidate
+            best_tasks = tasks
+            best_changelists = changelists
+            best_score = score
+
+    return best_path, best_tasks, best_changelists
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[1] in {"-h", "--help"}:
+        usage(0)
+
+    if len(argv) != 2:
+        usage()
+
+    issue = argv[1]
+    project_path, tasks, changelists = resolve_project_context()
+    os.environ["IDEA_PROJECT_PATH"] = project_path
+
+    summary = jira_summary(issue)
+    print(f"{issue}: {summary}")
+
+    existing_branch = matching_issue_branch(issue)
+    if existing_branch:
+        branch = ensure_branch(existing_branch)
+    else:
+        copilot_out = copilot_text(issue, summary)
+        lines = copilot_out.splitlines()
+        slug = slugify(lines[0] if lines else "")
+        branch = ensure_branch(f"{issue}_{slug}")
+
+    existing_changelist = find_issue_changelist(changelists, issue)
+    if existing_changelist:
+        changelist = existing_changelist["name"]
+    else:
+        copilot_out = copilot_text(issue, summary)
+        lines = copilot_out.splitlines()
+        desc = lines[1].strip() if len(lines) > 1 else summary
+        changelist = f"{issue} {desc}"
+
+    existing_task = find_issue_task(tasks, issue)
+    task_id = existing_task["id"] if existing_task else issue
+
+    idea_failed = False
+    if existing_changelist:
+        print(f"Reusing existing IDEA changelist: {changelist}")
+    else:
+        try:
+            request_json("POST", "/changelists/create", {"name": changelist})
+        except Exception as exc:
+            note_failed_step(f"could not create IDEA changelist '{changelist}'", exc)
+            try:
+                if find_named_objects(request_json("GET", "/changelists"), "name", changelist):
+                    print(f"Reusing existing IDEA changelist: {changelist}")
+                else:
+                    idea_failed = True
+            except Exception:
+                idea_failed = True
+
+    if not idea_failed:
+        try:
+            request_json("POST", "/changelists/set-default", {"name": changelist})
+        except Exception as exc:
+            note_failed_step(f"could not set default IDEA changelist '{changelist}'", exc)
+            idea_failed = True
+
+    try:
+        request_json("POST", "/tasks/open", {"id": task_id, "changelist": changelist})
+    except Exception as exc:
+        note_failed_step(f"could not open IDEA task '{task_id}'", exc)
+        try:
+            refreshed_tasks = request_json("GET", "/tasks")
+            matched_task = find_issue_task(refreshed_tasks, issue)
+            if matched_task:
+                print(f"Reusing existing IDEA task: {matched_task.get('id', issue)}")
+            else:
+                idea_failed = True
+        except Exception:
+            idea_failed = True
+    else:
+        if existing_task:
+            print(f"Reusing existing IDEA task: {task_id}")
+
+    if idea_failed:
+        print(
+            f"Note: IDEA integration uses http://localhost:63344 for project {project_path}",
+            file=sys.stderr,
+        )
+
+    print(f"Branch: {branch}")
+    print(f"Changelist: {changelist}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        detail = stderr or stdout or str(exc)
+        raise SystemExit(fatal(detail))
+    except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
+        raise SystemExit(fatal(str(exc)))
