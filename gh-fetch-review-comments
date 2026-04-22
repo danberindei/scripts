@@ -18,7 +18,15 @@ fi
 
 pr_number="${1:-}"
 if [ -z "$pr_number" ]; then
-  pr_number="$(gh pr view --json number -q .number)"
+  pr_number="$(gh pr view --json number -q .number 2>/dev/null)" || true
+fi
+if [ -z "$pr_number" ]; then
+  current_branch="$(git rev-parse --abbrev-ref HEAD)"
+  pr_number="$(gh pr list --head "$current_branch" --state open --json number -q '.[0].number')"
+fi
+if [ -z "$pr_number" ]; then
+  echo "Could not detect PR number; pass PR_NUMBER as argument" >&2
+  exit 1
 fi
 
 pr_url="$(gh pr view "$pr_number" --json url -q .url)"
