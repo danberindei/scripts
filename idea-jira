@@ -10,7 +10,7 @@ import sys
 from idea_http import request_json
 
 
-USAGE = """Usage: jira-start <ISSUE-KEY>
+USAGE = """Usage: idea-jira <ISSUE-KEY>
   Creates or reuses a git branch, IDEA task, and IDEA changelist for a Jira issue"""
 
 
@@ -143,11 +143,10 @@ def matching_issue_branch(issue: str) -> str | None:
     return None
 
 
-def ensure_branch(branch: str) -> str:
+def ensure_branch(branch: str) -> tuple[str, bool]:
     current = command_output(["git", "branch", "--show-current"]).strip()
     if current == branch:
-        print(f"Reusing current branch: {branch}")
-        return branch
+        return branch, True
 
     exists = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
@@ -158,11 +157,10 @@ def ensure_branch(branch: str) -> str:
 
     if exists:
         run_command(["git", "checkout", branch], capture_output=False)
-        print(f"Reusing existing branch: {branch}")
-        return branch
+        return branch, True
 
     run_command(["git", "checkout", "-b", branch], capture_output=False)
-    return branch
+    return branch, False
 
 
 def find_issue_task(tasks, issue: str) -> dict | None:
@@ -278,17 +276,19 @@ def main(argv: list[str]) -> int:
 
     summary = jira_summary(issue)
     print(f"{issue}: {summary}")
+    print(f"Project: {Path(project_path).name}")
 
     existing_branch = matching_issue_branch(issue)
     if existing_branch:
-        branch = ensure_branch(existing_branch)
+        branch, branch_reused = ensure_branch(existing_branch)
     else:
         copilot_out = copilot_text(issue, summary)
         lines = copilot_out.splitlines()
         slug = slugify(lines[0] if lines else "")
-        branch = ensure_branch(f"{issue}_{slug}")
+        branch, branch_reused = ensure_branch(f"{issue}_{slug}")
 
     existing_changelist = find_issue_changelist(changelists, issue)
+    changelist_reused = bool(existing_changelist)
     if existing_changelist:
         changelist = existing_changelist["name"]
     else:
@@ -298,19 +298,18 @@ def main(argv: list[str]) -> int:
         changelist = f"{issue} {desc}"
 
     existing_task = find_issue_task(tasks, issue)
+    task_reused = bool(existing_task)
     task_id = existing_task["id"] if existing_task else issue
 
     idea_failed = False
-    if existing_changelist:
-        print(f"Reusing existing IDEA changelist: {changelist}")
-    else:
+    if not existing_changelist:
         try:
             request_json("POST", "/changelists/create", {"name": changelist})
         except Exception as exc:
             note_failed_step(f"could not create IDEA changelist '{changelist}'", exc)
             try:
                 if find_named_objects(request_json("GET", "/changelists"), "name", changelist):
-                    print(f"Reusing existing IDEA changelist: {changelist}")
+                    changelist_reused = True
                 else:
                     idea_failed = True
             except Exception:
@@ -331,14 +330,12 @@ def main(argv: list[str]) -> int:
             refreshed_tasks = request_json("GET", "/tasks")
             matched_task = find_issue_task(refreshed_tasks, issue)
             if matched_task:
-                print(f"Reusing existing IDEA task: {matched_task.get('id', issue)}")
+                task_id = matched_task.get("id", issue)
+                task_reused = True
             else:
                 idea_failed = True
         except Exception:
             idea_failed = True
-    else:
-        if existing_task:
-            print(f"Reusing existing IDEA task: {task_id}")
 
     if idea_failed:
         print(
@@ -346,8 +343,12 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
 
-    print(f"Branch: {branch}")
-    print(f"Changelist: {changelist}")
+    branch_status = "reused" if branch_reused else "created"
+    changelist_status = "reused" if changelist_reused else "created"
+    task_status = "reused" if task_reused else "created"
+    print(f"Branch: {branch} ({branch_status})")
+    print(f"Changelist: {changelist} ({changelist_status})")
+    print(f"Task: {task_id} ({task_status})")
     return 0
 
 
