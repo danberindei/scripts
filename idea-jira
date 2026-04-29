@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 from idea_http import request_json
 
@@ -64,15 +65,14 @@ def copilot_text(issue: str, summary: str) -> str:
     prompt = (
         f"Jira issue: {issue}\n"
         f"Summary: {summary}\n\n"
-        "Output EXACTLY two lines, nothing else:\n"
-        "Line 1: A short branch name slug (3-5 lowercase words separated by underscores, no hyphens, no punctuation)\n"
-        "Line 2: A concise one-line description of the work to be done"
+        "Output EXACTLY one line, nothing else:\n"
+        "A short branch name slug (3-5 lowercase words separated by underscores, no hyphens, no punctuation)"
     )
     result = run_command(
         [
             "copilot",
             "--model",
-            "gpt-5-mini",
+            "gpt-4.1",
             "--output-format",
             "json",
             "--no-ask-user",
@@ -108,16 +108,6 @@ def slugify(text: str) -> str:
     if not slug:
         raise RuntimeError("copilot returned an empty branch slug")
     return slug
-
-
-def find_named_objects(value, field: str, expected: str) -> bool:
-    if isinstance(value, dict):
-        if value.get(field) == expected:
-            return True
-        return any(find_named_objects(item, field, expected) for item in value.values())
-    if isinstance(value, list):
-        return any(find_named_objects(item, field, expected) for item in value)
-    return False
 
 
 def note_failed_step(label: str, exc: Exception) -> None:
@@ -200,10 +190,20 @@ def find_issue_changelist(changelists, issue: str) -> dict | None:
     return default_matches[0] if default_matches else matches[0]
 
 
+def find_changelist_by_name(changelists, name: str) -> dict | None:
+    if not isinstance(changelists, list):
+        return None
+    for changelist in changelists:
+        if isinstance(changelist, dict) and changelist.get("name") == name:
+            return changelist
+    return None
+
+
 def candidate_project_paths() -> list[str]:
     git_root = Path(command_output(["git", "rev-parse", "--show-toplevel"]).strip()).resolve()
     candidates = [git_root]
     candidates.extend(candidate for candidate in git_root.parents if (candidate / ".idea").exists())
+    candidates.extend(related_open_project_paths(git_root))
 
     seen: set[str] = set()
     ordered: list[str] = []
@@ -215,52 +215,68 @@ def candidate_project_paths() -> list[str]:
     return ordered
 
 
-def project_state_score(tasks, changelists, distance: int) -> tuple[int, int, int, int, int]:
-    task_list = tasks if isinstance(tasks, list) else []
-    changelist_list = changelists if isinstance(changelists, list) else []
-    non_default_tasks = sum(1 for task in task_list if isinstance(task, dict) and task.get("id") != "Default")
-    non_default_changelists = sum(
-        1 for changelist in changelist_list if isinstance(changelist, dict) and changelist.get("name") != "Changes"
-    )
+def expand_recent_project_path(value: str) -> str:
+    return value.replace("$USER_HOME$", str(Path.home()))
+
+
+def is_related_project(candidate: Path, git_root: Path) -> bool:
+    if candidate == git_root:
+        return True
+
+    git_parent = git_root.parent
     return (
-        non_default_tasks,
-        non_default_changelists,
-        len(task_list),
-        len(changelist_list),
-        -distance,
+        git_root in candidate.parents
+        or candidate in git_root.parents
+        or candidate.parent == git_parent
+        or git_parent in candidate.parents
     )
+
+
+def related_open_project_paths(git_root: Path) -> list[Path]:
+    config_root = Path.home() / ".config" / "JetBrains"
+    recent_projects_files = sorted(
+        config_root.glob("IntelliJIdea*/options/recentProjects.xml"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+    related_paths: list[Path] = []
+    for recent_projects in recent_projects_files:
+        try:
+            root = ET.parse(recent_projects).getroot()
+        except ET.ParseError:
+            continue
+
+        for entry in root.findall(".//entry"):
+            key = entry.get("key")
+            project = entry.find("./value/RecentProjectMetaInfo")
+            if not key or project is None or project.get("opened") != "true":
+                continue
+
+            candidate = Path(os.path.realpath(expand_recent_project_path(key)))
+            if is_related_project(candidate, git_root):
+                related_paths.append(candidate)
+
+    return related_paths
 
 
 def resolve_project_context() -> tuple[str, object, object]:
     configured = os.environ.get("IDEA_PROJECT_PATH")
     if configured:
         project_path = os.path.realpath(configured)
-        return (
-            project_path,
-            optional_json_for_path("GET", "/tasks", project_path),
-            optional_json_for_path("GET", "/changelists", project_path),
-        )
+        tasks = optional_json_for_path("GET", "/tasks", project_path)
+        changelists = optional_json_for_path("GET", "/changelists", project_path)
+        if tasks is not None or changelists is not None:
+            return (project_path, tasks, changelists)
 
     candidates = candidate_project_paths()
-    best_path = candidates[0]
-    best_tasks = None
-    best_changelists = None
-    best_score = (-1, -1, -1, -1, 0)
-
-    for distance, candidate in enumerate(candidates):
+    for candidate in candidates:
         tasks = optional_json_for_path("GET", "/tasks", candidate)
         changelists = optional_json_for_path("GET", "/changelists", candidate)
-        if tasks is None and changelists is None:
-            continue
+        if tasks is not None or changelists is not None:
+            return candidate, tasks, changelists
 
-        score = project_state_score(tasks, changelists, distance)
-        if score > best_score:
-            best_path = candidate
-            best_tasks = tasks
-            best_changelists = changelists
-            best_score = score
-
-    return best_path, best_tasks, best_changelists
+    return candidates[0], None, None
 
 
 def main(argv: list[str]) -> int:
@@ -292,10 +308,7 @@ def main(argv: list[str]) -> int:
     if existing_changelist:
         changelist = existing_changelist["name"]
     else:
-        copilot_out = copilot_text(issue, summary)
-        lines = copilot_out.splitlines()
-        desc = lines[1].strip() if len(lines) > 1 else summary
-        changelist = f"{issue} {desc}"
+        changelist = f"{issue} {summary}"
 
     existing_task = find_issue_task(tasks, issue)
     task_reused = bool(existing_task)
@@ -306,36 +319,50 @@ def main(argv: list[str]) -> int:
         try:
             request_json("POST", "/changelists/create", {"name": changelist})
         except Exception as exc:
-            note_failed_step(f"could not create IDEA changelist '{changelist}'", exc)
             try:
-                if find_named_objects(request_json("GET", "/changelists"), "name", changelist):
+                refreshed_changelists = request_json("GET", "/changelists")
+                if find_changelist_by_name(refreshed_changelists, changelist):
                     changelist_reused = True
                 else:
+                    note_failed_step(f"could not create IDEA changelist '{changelist}'", exc)
                     idea_failed = True
             except Exception:
+                note_failed_step(f"could not create IDEA changelist '{changelist}'", exc)
                 idea_failed = True
 
     if not idea_failed:
         try:
             request_json("POST", "/changelists/set-default", {"name": changelist})
         except Exception as exc:
-            note_failed_step(f"could not set default IDEA changelist '{changelist}'", exc)
-            idea_failed = True
-
-    try:
-        request_json("POST", "/tasks/open", {"id": task_id, "changelist": changelist})
-    except Exception as exc:
-        note_failed_step(f"could not open IDEA task '{task_id}'", exc)
-        try:
-            refreshed_tasks = request_json("GET", "/tasks")
-            matched_task = find_issue_task(refreshed_tasks, issue)
-            if matched_task:
-                task_id = matched_task.get("id", issue)
-                task_reused = True
-            else:
+            try:
+                refreshed_changelists = request_json("GET", "/changelists")
+                selected = find_changelist_by_name(refreshed_changelists, changelist)
+                if not (isinstance(selected, dict) and selected.get("default")):
+                    note_failed_step(f"could not set default IDEA changelist '{changelist}'", exc)
+                    idea_failed = True
+            except Exception:
+                note_failed_step(f"could not set default IDEA changelist '{changelist}'", exc)
                 idea_failed = True
-        except Exception:
-            idea_failed = True
+
+    if not (existing_task and existing_task.get("active")):
+        try:
+            request_json("POST", "/tasks/open", {"id": task_id, "changelist": changelist, "summary": f"{issue} {summary}"})
+        except Exception as exc:
+            try:
+                refreshed_tasks = request_json("GET", "/tasks")
+                matched_task = find_issue_task(refreshed_tasks, issue)
+                if matched_task:
+                    task_id = matched_task.get("id", issue)
+                    task_reused = True
+                    if not matched_task.get("active"):
+                        note_failed_step(f"could not open IDEA task '{task_id}'", exc)
+                        idea_failed = True
+                else:
+                    note_failed_step(f"could not open IDEA task '{task_id}'", exc)
+                    idea_failed = True
+            except Exception:
+                note_failed_step(f"could not open IDEA task '{task_id}'", exc)
+                idea_failed = True
 
     if idea_failed:
         print(
