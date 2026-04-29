@@ -13,6 +13,11 @@ from pathlib import Path
 
 
 BOLD = "\033[1m"
+BOLD_RESET = "\033[22m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+CYAN = "\033[36m"
 RESET = "\033[0m"
 
 
@@ -31,7 +36,13 @@ def human_size(bytes_val):
 
 def bold(text, enabled=False):
     if enabled:
-        return f"{BOLD}{text}{RESET}"
+        return f"{BOLD}{text}{BOLD_RESET}"
+    return text
+
+
+def color(text, code, enabled=False):
+    if enabled:
+        return f"{code}{text}{RESET}"
     return text
 
 
@@ -135,6 +146,7 @@ def get_tmpfs_usage():
 def get_synthetic_entries():
     """Return synthetic entries for free memory+swap and tmpfs."""
     meminfo = get_meminfo()
+    total_mem = meminfo.get('MemTotal', 0) * 1024
     free_mem = meminfo.get('MemFree', 0) * 1024
     available_mem = meminfo.get('MemAvailable', 0) * 1024
     free_swap = meminfo.get('SwapFree', 0) * 1024
@@ -146,6 +158,8 @@ def get_synthetic_entries():
             'memory_bytes': free_mem,
             'swap_bytes': free_swap,
             'shmem_bytes': reclaimable_cache,
+            'available_bytes': available_mem,
+            'total_bytes': total_mem,
             'root_pid': None,
             'service': '[free]',
             'executables': [],
@@ -340,7 +354,20 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
             exes_str = exes_str[:exes_width-3] + '...'
 
         memory_col = bold(f"{memory_str:>9}", watch_mode)
-        print(f"{total_str:>9} {memory_col} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {service:40} {exes_str}", file=file)
+        row_text = f"{total_str:>9} {memory_col} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {service:40} {exes_str}"
+        if is_tty and service == '[free]':
+            available_bytes = row.get('available_bytes')
+            total_mem = row.get('total_bytes') or 0
+            available_ratio = (available_bytes / total_mem) if available_bytes is not None and total_mem else None
+            if available_ratio is not None and available_ratio < 0.10:
+                row_text = color(row_text, RED, True)
+            elif available_ratio is not None and available_ratio < 0.20:
+                row_text = color(row_text, YELLOW, True)
+            else:
+                row_text = color(row_text, GREEN, True)
+        elif is_tty and service == '[tmpfs]':
+            row_text = color(row_text, CYAN, True)
+        print(row_text, file=file)
 
 
 def print_processes_table(data, title=None, watch_mode=False, file=sys.stdout):
