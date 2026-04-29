@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+while IFS= read -r url; do
+    [[ -z "$url" ]] && continue
+    yt-dlp "$@" "$url"
+done
