@@ -145,6 +145,15 @@ def main() -> int:
     out.write_text(content, encoding="utf-8")
     if backup.exists():
         print(f"saved kitty session to {out} (backup: {backup})")
+        diff = subprocess.run(
+            ["diff", "--unified=2", str(backup), str(out)],
+            capture_output=True,
+            text=True,
+        )
+        if diff.stdout:
+            print(diff.stdout, end="")
+        else:
+            print("(no changes)")
     else:
         print(f"saved kitty session to {out}")
     return 0
