@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Show commits in a range: file -> function -> lines.
+
+Usage:
+  git-commit-map                 # merge-base with main/master
+  git-commit-map <branch>        # merge-base with <branch>
+  git-commit-map <rev>..<rev>    # explicit range
+  git-commit-map --from-init     # from first commit
+"""
+import re, subprocess, sys
+from collections import defaultdict
+
+
+def run(cmd, check=True):
+    return subprocess.run(cmd, capture_output=True, text=True, check=check)
+
+
+def resolve_range(arg):
+    if arg == '--from-init':
+        root = run(['git', 'rev-list', '--max-parents=0', 'HEAD']).stdout.strip()
+        return f'{root}..HEAD'
+    if '..' in arg or arg.startswith('^'):
+        return arg
+    r = run(['git', 'merge-base', 'HEAD', arg], check=False)
+    return f'{r.stdout.strip()}..HEAD' if r.returncode == 0 else arg
+
+
+def default_range():
+    for b in ['main', 'master', 'origin/main', 'origin/master']:
+        r = run(['git', 'merge-base', 'HEAD', b], check=False)
+        if r.returncode == 0:
+            return f'{r.stdout.strip()}..HEAD'
+    return 'HEAD~10..HEAD'
+
+
+def parse_diff(diff_text):
+    """Return {file: {func: [(start, end)]}}."""
+    files = {}
+    cur = None
+    for line in diff_text.splitlines():
+        if line.startswith('+++ b/'):
+            cur = line[6:]
+            files.setdefault(cur, defaultdict(list))
+        elif line.startswith('+++ /dev/null'):
+            cur = None
+        elif line.startswith('@@') and cur is not None:
+            m = re.match(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@(.*)', line)
+            if m:
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) is not None else 1
+                end = start + max(count - 1, 0)
+                func = m.group(3).strip()
+                files[cur][func].append((start, end))
+    return files
+
+
+def fmt(start, end):
+    if end == 0:
+        return f'after {start}'
+    return f'{start}' if start == end else f'{start}-{end}'
+
+
+def main():
+    range_spec = resolve_range(sys.argv[1]) if len(sys.argv) > 1 else default_range()
+    shas = run(['git', 'log', '--format=%H', range_spec]).stdout.strip().splitlines()
+    if not shas:
+        print('No commits found.')
+        return
+
+    for sha in reversed(shas):
+        subject = run(['git', 'show', '--no-patch', '--format=%s', sha]).stdout.strip()
+        diff = parse_diff(run(['git', 'show', '--unified=0', '--format=', sha]).stdout)
+
+        print(f'{sha[:12]}  {subject}')
+        for filepath, funcs in diff.items():
+            print(f'  {filepath}')
+            for func, ranges in funcs.items():
+                locs = ', '.join(fmt(s, e) for s, e in ranges)
+                if func:
+                    print(f'    {func}')
+                    print(f'      {locs}')
+                else:
+                    print(f'    {locs}')
+        print()
+
+
+if __name__ == '__main__':
+    main()
