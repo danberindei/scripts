@@ -72,8 +72,15 @@ def init():
         exit(1)
 
   print("Fetching new details from %s" % upstream_repo)
-  run_git("fetch %s" % upstream_repo)
-  run_git("fetch %s --tags" % upstream_repo)
+  try:
+    run_git("fetch %s" % upstream_repo)
+    run_git("fetch %s --tags" % upstream_repo)
+  except Exception as e:
+    print("Failed to fetch from %s. Configure the upstream remote with:" % upstream_repo)
+    print("  git remote add %s <url>" % upstream_repo)
+    print("Or use a different remote with:")
+    print("  git config %s <remote>" % CONFIG_UPSTREAM_REPO)
+    sys.exit(1)
 
 def finish():
   run_git("checkout -q %s" % checked_out_branch)
