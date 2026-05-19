@@ -8,7 +8,7 @@ if [[ -n "$transcript" && -f "$transcript" ]]; then
   ' 2>/dev/null)
   limit=140000
   if [[ "$input_tokens" =~ ^[0-9]+$ ]] && ((input_tokens > limit)); then
-    echo "Context at ${input_tokens} tokens (>${limit}) - run /compact or start a new session." >&2
+    echo "Context at ${input_tokens} tokens (>${limit}) - write a summary of what you did and what's left, then stop." >&2
     exit 2
   fi
 fi
