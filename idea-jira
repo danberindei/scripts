@@ -26,20 +26,21 @@ def fatal(message: str) -> int:
     return 1
 
 
-def run_command(args: list[str], *, capture_output: bool = True, check: bool = True):
+def run_command(args: list[str], *, capture_output: bool = True, check: bool = True, cwd: Path | None = None):
     try:
         return subprocess.run(
             args,
             check=check,
             text=True,
             capture_output=capture_output,
+            cwd=cwd,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(f"command not found: {args[0]}") from exc
 
 
-def command_output(args: list[str]) -> str:
-    return run_command(args).stdout
+def command_output(args: list[str], cwd: Path | None = None) -> str:
+    return run_command(args, cwd=cwd).stdout
 
 
 def optional_json(method: str, endpoint: str):
@@ -117,24 +118,55 @@ def note_failed_step(label: str, exc: Exception) -> None:
         print(message, file=sys.stderr)
 
 
-def list_local_branches() -> list[str]:
-    output = command_output(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"])
+def git_roots_from_project(project_path: str) -> list[Path]:
+    vcs_xml = Path(project_path) / ".idea" / "vcs.xml"
+    if not vcs_xml.exists():
+        return []
+
+    try:
+        root = ET.parse(vcs_xml).getroot()
+    except ET.ParseError:
+        return []
+
+    roots: list[Path] = []
+    for mapping in root.findall(".//mapping"):
+        if mapping.get("vcs") != "Git":
+            continue
+        directory = mapping.get("directory", "")
+        directory = directory.replace("$PROJECT_DIR$", project_path)
+        resolved = Path(os.path.realpath(directory))
+        if resolved.exists():
+            roots.append(resolved)
+
+    return roots
+
+
+def git_roots_for_issue(project_path: str) -> list[Path]:
+    roots = git_roots_from_project(project_path)
+    if roots:
+        return roots
+    current_root = Path(command_output(["git", "rev-parse", "--show-toplevel"]).strip()).resolve()
+    return [current_root]
+
+
+def list_local_branches(cwd: Path | None = None) -> list[str]:
+    output = command_output(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"], cwd=cwd)
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def matching_issue_branch(issue: str) -> str | None:
-    current = command_output(["git", "branch", "--show-current"]).strip()
+def matching_issue_branch(issue: str, cwd: Path | None = None) -> str | None:
+    current = command_output(["git", "branch", "--show-current"], cwd=cwd).strip()
     if current.startswith(f"{issue}_"):
         return current
 
-    matches = sorted(branch for branch in list_local_branches() if branch.startswith(f"{issue}_"))
+    matches = sorted(branch for branch in list_local_branches(cwd=cwd) if branch.startswith(f"{issue}_"))
     if len(matches) == 1:
         return matches[0]
     return None
 
 
-def ensure_branch(branch: str) -> tuple[str, bool]:
-    current = command_output(["git", "branch", "--show-current"]).strip()
+def ensure_branch(branch: str, cwd: Path | None = None) -> tuple[str, bool]:
+    current = command_output(["git", "branch", "--show-current"], cwd=cwd).strip()
     if current == branch:
         return branch, True
 
@@ -143,13 +175,14 @@ def ensure_branch(branch: str) -> tuple[str, bool]:
         check=False,
         capture_output=True,
         text=True,
+        cwd=cwd,
     ).returncode == 0
 
     if exists:
-        run_command(["git", "checkout", branch], capture_output=False)
+        run_command(["git", "checkout", branch], capture_output=False, cwd=cwd)
         return branch, True
 
-    run_command(["git", "checkout", "-b", branch], capture_output=False)
+    run_command(["git", "checkout", "-b", branch], capture_output=False, cwd=cwd)
     return branch, False
 
 
@@ -294,14 +327,33 @@ def main(argv: list[str]) -> int:
     print(f"{issue}: {summary}")
     print(f"Project: {Path(project_path).name}")
 
-    existing_branch = matching_issue_branch(issue)
-    if existing_branch:
-        branch, branch_reused = ensure_branch(existing_branch)
-    else:
+    git_roots = git_roots_for_issue(project_path)
+
+    existing_branch = None
+    for git_root in git_roots:
+        existing_branch = matching_issue_branch(issue, cwd=git_root)
+        if existing_branch:
+            break
+
+    if not existing_branch:
         copilot_out = copilot_text(issue, summary)
         lines = copilot_out.splitlines()
         slug = slugify(lines[0] if lines else "")
-        branch, branch_reused = ensure_branch(f"{issue}_{slug}")
+        branch = f"{issue}_{slug}"
+    else:
+        branch = existing_branch
+
+    branch_reused = True
+    for git_root in git_roots:
+        try:
+            _, reused = ensure_branch(branch, cwd=git_root)
+            if not reused:
+                branch_reused = False
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            detail = stderr or stdout or str(exc)
+            print(f"Note: could not create branch '{branch}' in {git_root}: {detail}", file=sys.stderr)
 
     existing_changelist = find_issue_changelist(changelists, issue)
     changelist_reused = bool(existing_changelist)
