@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Rewrite a branch history to remove all `Co-authored-by:` footer lines.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: git-remove-co-authors <base>..<tip>
+EOF
+}
+
+if [[ $# -ne 1 ]] || [[ "$1" == -h ]] || [[ "$1" == --help ]]; then
+  usage
+  exit $([[ "${1:-}" == -h || "${1:-}" == --help ]] && echo 0 || echo 1)
+fi
+
+range="$1"
+base="${range%..*}"
+tip="${range##*..}"
+
+if [[ -z "$base" || -z "$tip" || "$base" == "$range" ]]; then
+  echo "Error: argument must be in <base>..<tip> form." >&2
+  usage >&2
+  exit 1
+fi
+
+root_dir="$(git rev-parse --show-toplevel)"
+cd "$root_dir"
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Refusing to rewrite history with a dirty working tree." >&2
+  exit 1
+fi
+
+git rev-parse --verify "$base^{commit}" >/dev/null
+git rev-parse --verify "$tip^{commit}" >/dev/null
+
+if ! git merge-base --is-ancestor "$base" "$tip"; then
+  echo "Expected '$base' to be an ancestor of '$tip'." >&2
+  exit 1
+fi
+
+echo "Rewriting commits on $tip after $base to remove Co-authored-by lines..."
+
+git filter-repo --force --refs "$base..$tip" \
+  --message-callback 'import re; return re.sub(rb"^Co-authored-by:.*\n", b"", message, flags=re.MULTILINE)'
+
+echo "Done. Force-push $tip when you are ready to publish the rewritten history."
