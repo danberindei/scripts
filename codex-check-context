@@ -2,13 +2,14 @@
 # Codex PreToolUse hook (~/.codex/hooks.json).
 # Blocks when context exceeds the token limit and directs the agent to run /session-handoff.
 limit=150000
+handoff_skill=session-handoff
 
 input=$(cat)
 transcript=$(echo "$input" | jq -r '.transcript_path // empty')
 session_id=$(echo "$input" | jq -r '.session_id // empty')
 
 if [[ -n "$session_id" ]]; then
-  flag_file="/tmp/codex-session-handoff-${session_id}"
+  flag_file="/tmp/codex-${handoff_skill}-${session_id}"
 
   # Allow tool calls that are part of an in-progress session-handoff
   if [[ -f "$flag_file" ]]; then
@@ -27,11 +28,11 @@ if [[ -n "$transcript" && -f "$transcript" ]]; then
       first(inputs | fromjson? | select(.type=="event_msg" and .payload.type=="user_message"))
       | .payload.message
     ' 2>/dev/null)
-    if echo "$last_msg" | grep -qi 'session.handoff'; then
+    if echo "$last_msg" | grep -qi "$handoff_skill"; then
       [[ -n "$session_id" ]] && touch "$flag_file"
       exit 0
     fi
-    jq -n --arg reason "Context at ${total_tokens} tokens (>${limit}) - run /session-handoff to capture the user's intent and what's left, then stop." \
+    jq -n --arg reason "Context at ${total_tokens} tokens (>${limit}) - run /${handoff_skill} to capture the user's intent and what's left, then stop." \
       '{decision:"block",reason:$reason}'
   fi
 fi
