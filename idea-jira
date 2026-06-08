@@ -400,7 +400,7 @@ def main(argv: list[str]) -> int:
 
     if not (existing_task and existing_task.get("active")):
         try:
-            request_json("POST", "/tasks/open", {"id": task_id, "changelist": changelist, "summary": f"{issue} {summary}", "branch": branch})
+            request_json("POST", "/tasks/open", {"id": task_id, "changelist": changelist})
         except Exception as exc:
             try:
                 refreshed_tasks = request_json("GET", "/tasks")
