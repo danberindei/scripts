@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import urllib.request
 import xml.etree.ElementTree as ET
 
 from idea_http import request_json
@@ -69,38 +70,39 @@ def copilot_text(issue: str, summary: str) -> str:
         "Output EXACTLY one line, nothing else:\n"
         "A short branch name slug (3-5 lowercase words separated by underscores, no hyphens, no punctuation)"
     )
-    result = run_command(
-        [
-            "copilot",
-            "--model",
-            "gpt-4.1",
-            "--output-format",
-            "json",
-            "--no-ask-user",
-            "-p",
-            prompt,
-        ]
+
+    github_token = command_output(["gh", "auth", "token"]).strip()
+    if not github_token:
+        raise RuntimeError("could not get GitHub token via 'gh auth token'")
+
+    body = json.dumps({
+        "model": "gpt-5-mini",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 50,
+        "temperature": 0,
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.githubcopilot.com/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {github_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "idea-jira/1.0",
+            "Editor-Version": "vscode/1.85.0",
+            "Editor-Plugin-Version": "copilot-chat/0.22.4",
+            "Openai-Intent": "conversation-panel",
+        },
+        method="POST",
     )
 
-    parts: list[str] = []
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        message = json.loads(line)
-        if message.get("type") != "assistant.message":
-            continue
-        content = message.get("data", {}).get("content", "")
-        if isinstance(content, str):
-            parts.append(content)
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(item.get("text", ""))
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
 
-    text = "".join(parts)
+    text = data["choices"][0]["message"]["content"].strip()
     if not text:
-        raise RuntimeError("copilot returned no assistant message content")
+        raise RuntimeError("Copilot API returned no content")
     return text
 
 
