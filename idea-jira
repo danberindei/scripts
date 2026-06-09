@@ -134,7 +134,7 @@ def git_roots_from_project(project_path: str) -> list[Path]:
     for mapping in root.findall(".//mapping"):
         if mapping.get("vcs") != "Git":
             continue
-        directory = mapping.get("directory", "")
+        directory = mapping.get("directory", "") or "$PROJECT_DIR$"
         directory = directory.replace("$PROJECT_DIR$", project_path)
         resolved = Path(os.path.realpath(directory))
         if resolved.exists():
@@ -345,18 +345,6 @@ def main(argv: list[str]) -> int:
     else:
         branch = existing_branch
 
-    branch_reused = True
-    for git_root in git_roots:
-        try:
-            _, reused = ensure_branch(branch, cwd=git_root)
-            if not reused:
-                branch_reused = False
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            stdout = (exc.stdout or "").strip()
-            detail = stderr or stdout or str(exc)
-            print(f"Note: could not create branch '{branch}' in {git_root}: {detail}", file=sys.stderr)
-
     existing_changelist = find_issue_changelist(changelists, issue)
     changelist_reused = bool(existing_changelist)
     if existing_changelist:
@@ -400,7 +388,7 @@ def main(argv: list[str]) -> int:
 
     if not (existing_task and existing_task.get("active")):
         try:
-            request_json("POST", "/tasks/open", {"id": task_id, "changelist": changelist})
+            request_json("POST", "/tasks/open", {"id": task_id, "changelist": changelist, "branch": branch})
         except Exception as exc:
             try:
                 refreshed_tasks = request_json("GET", "/tasks")
@@ -423,6 +411,18 @@ def main(argv: list[str]) -> int:
             f"Note: IDEA integration uses http://localhost:63344 for project {project_path}",
             file=sys.stderr,
         )
+
+    branch_reused = True
+    for git_root in git_roots:
+        try:
+            _, reused = ensure_branch(branch, cwd=git_root)
+            if not reused:
+                branch_reused = False
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            detail = stderr or stdout or str(exc)
+            print(f"Note: could not create branch '{branch}' in {git_root}: {detail}", file=sys.stderr)
 
     branch_status = "reused" if branch_reused else "created"
     changelist_status = "reused" if changelist_reused else "created"
