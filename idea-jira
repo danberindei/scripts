@@ -3,17 +3,20 @@
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
-import urllib.request
 import xml.etree.ElementTree as ET
 
 from idea_http import request_json
 
 
-USAGE = """Usage: idea-jira <ISSUE-KEY>
-  Creates or reuses a git branch, IDEA task, and IDEA changelist for a Jira issue"""
+USAGE = """Usage: idea-jira <ISSUE-KEY> [BRANCH] [--dry-run]
+  Creates or reuses a git branch, IDEA task, and IDEA changelist for a Jira issue
+  If BRANCH is omitted, reuses an existing branch (from git or the IDEA task);
+  fails if none can be resolved - pass BRANCH to create a new one
+  --dry-run reports what would be done without making any changes"""
+
+PROTECTED_BRANCHES = {"main", "master", "HEAD"}
 
 
 def usage(exit_code: int = 1) -> None:
@@ -61,56 +64,6 @@ def optional_json_for_path(method: str, endpoint: str, project_path: str):
 def jira_summary(issue: str) -> str:
     payload = json.loads(command_output(["jira", "issue", "view", issue, "--raw"]))
     return payload["fields"]["summary"]
-
-
-def copilot_text(issue: str, summary: str) -> str:
-    prompt = (
-        f"Jira issue: {issue}\n"
-        f"Summary: {summary}\n\n"
-        "Output EXACTLY one line, nothing else:\n"
-        "A short branch name slug (3-5 lowercase words separated by underscores, no hyphens, no punctuation)"
-    )
-
-    github_token = command_output(["gh", "auth", "token"]).strip()
-    if not github_token:
-        raise RuntimeError("could not get GitHub token via 'gh auth token'")
-
-    body = json.dumps({
-        "model": "gpt-5-mini",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 50,
-        "temperature": 0,
-    }).encode()
-
-    req = urllib.request.Request(
-        "https://api.githubcopilot.com/chat/completions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {github_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "idea-jira/1.0",
-            "Editor-Version": "vscode/1.85.0",
-            "Editor-Plugin-Version": "copilot-chat/0.22.4",
-            "Openai-Intent": "conversation-panel",
-        },
-        method="POST",
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
-
-    text = data["choices"][0]["message"]["content"].strip()
-    if not text:
-        raise RuntimeError("Copilot API returned no content")
-    return text
-
-
-def slugify(text: str) -> str:
-    slug = re.sub(r"[^a-z0-9_]", "", text.lower())
-    if not slug:
-        raise RuntimeError("copilot returned an empty branch slug")
-    return slug
 
 
 def note_failed_step(label: str, exc: Exception) -> None:
@@ -165,6 +118,69 @@ def matching_issue_branch(issue: str, cwd: Path | None = None) -> str | None:
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def branch_exists(branch: str, git_roots: list[Path]) -> bool:
+    for git_root in git_roots:
+        result = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=git_root,
+        )
+        if result.returncode == 0:
+            return True
+    return False
+
+
+def task_feature_branch(task: dict | None) -> str | None:
+    if not task:
+        return None
+    branches = task.get("branches")
+    if not isinstance(branches, list):
+        return None
+
+    feature_names: list[str] = []
+    other_names: list[str] = []
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        name = branch.get("name")
+        if not name:
+            continue
+        if branch.get("original"):
+            other_names.append(name)
+        else:
+            feature_names.append(name)
+
+    names = feature_names or other_names
+    return names[0] if names else None
+
+
+def branch_from_task(issue: str, task: dict | None, git_roots: list[Path]) -> str:
+    task_branch = task_feature_branch(task)
+    if task_branch:
+        if task_branch in PROTECTED_BRANCHES:
+            raise RuntimeError(
+                f"IDEA task {issue} is associated with protected branch "
+                f"'{task_branch}'; pass an explicit branch name"
+            )
+        if not branch_exists(task_branch, git_roots):
+            raise RuntimeError(
+                f"IDEA task {issue} branch '{task_branch}' no longer exists in git; "
+                "pass an explicit branch name"
+            )
+        return task_branch
+    if task is not None:
+        raise RuntimeError(
+            f"IDEA task {issue} has no feature branch recorded; pass an explicit "
+            "branch name"
+        )
+    raise RuntimeError(
+        f"no existing branch found for {issue} and no IDEA task to derive one from; "
+        "pass an explicit branch name"
+    )
 
 
 def ensure_branch(branch: str, cwd: Path | None = None) -> tuple[str, bool]:
@@ -315,13 +331,22 @@ def resolve_project_context() -> tuple[str, object, object]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 2 and argv[1] in {"-h", "--help"}:
+    if any(arg in {"-h", "--help"} for arg in argv[1:]):
         usage(0)
 
-    if len(argv) != 2:
+    dry_run = False
+    positional: list[str] = []
+    for arg in argv[1:]:
+        if arg == "--dry-run":
+            dry_run = True
+        else:
+            positional.append(arg)
+
+    if len(positional) not in {1, 2}:
         usage()
 
-    issue = argv[1]
+    issue = positional[0]
+    requested_branch = positional[1] if len(positional) == 2 else None
     project_path, tasks, changelists = resolve_project_context()
     os.environ["IDEA_PROJECT_PATH"] = project_path
 
@@ -331,19 +356,23 @@ def main(argv: list[str]) -> int:
 
     git_roots = git_roots_for_issue(project_path)
 
+    existing_task = find_issue_task(tasks, issue)
+    task_reused = bool(existing_task)
+    task_id = existing_task["id"] if existing_task else issue
+    task_summary = summary
+
     existing_branch = None
     for git_root in git_roots:
         existing_branch = matching_issue_branch(issue, cwd=git_root)
         if existing_branch:
             break
 
-    if not existing_branch:
-        copilot_out = copilot_text(issue, summary)
-        lines = copilot_out.splitlines()
-        slug = slugify(lines[0] if lines else "")
-        branch = f"{issue}_{slug}"
-    else:
+    if requested_branch:
+        branch = requested_branch
+    elif existing_branch:
         branch = existing_branch
+    else:
+        branch = branch_from_task(issue, existing_task, git_roots)
 
     existing_changelist = find_issue_changelist(changelists, issue)
     changelist_reused = bool(existing_changelist)
@@ -352,9 +381,15 @@ def main(argv: list[str]) -> int:
     else:
         changelist = f"{issue} {summary}"
 
-    existing_task = find_issue_task(tasks, issue)
-    task_reused = bool(existing_task)
-    task_id = existing_task["id"] if existing_task else issue
+    if dry_run:
+        branch_status = "reuse" if (existing_branch or branch_exists(branch, git_roots)) else "create"
+        changelist_status = "reuse" if changelist_reused else "create"
+        task_status = "reuse" if task_reused else "create"
+        print("Dry run, no changes made:")
+        print(f"Branch: {branch} ({branch_status})")
+        print(f"Changelist: {changelist} ({changelist_status})")
+        print(f"Task: {task_id} - {task_summary} ({task_status})")
+        return 0
 
     idea_failed = False
     if not existing_changelist:
@@ -388,7 +423,11 @@ def main(argv: list[str]) -> int:
 
     if not (existing_task and existing_task.get("active")):
         try:
-            request_json("POST", "/tasks/open", {"id": task_id, "changelist": changelist, "branch": branch})
+            request_json(
+                "POST",
+                "/tasks/open",
+                {"id": task_id, "summary": task_summary, "changelist": changelist, "branch": branch},
+            )
         except Exception as exc:
             try:
                 refreshed_tasks = request_json("GET", "/tasks")
@@ -429,7 +468,7 @@ def main(argv: list[str]) -> int:
     task_status = "reused" if task_reused else "created"
     print(f"Branch: {branch} ({branch_status})")
     print(f"Changelist: {changelist} ({changelist_status})")
-    print(f"Task: {task_id} ({task_status})")
+    print(f"Task: {task_id} - {task_summary} ({task_status})")
     return 0
 
 
