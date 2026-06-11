@@ -73,6 +73,19 @@ def note_failed_step(label: str, exc: Exception) -> None:
         print(message, file=sys.stderr)
 
 
+def is_git_work_tree(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=path,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
 def git_roots_from_project(project_path: str) -> list[Path]:
     vcs_xml = Path(project_path) / ".idea" / "vcs.xml"
     if not vcs_xml.exists():
@@ -90,7 +103,7 @@ def git_roots_from_project(project_path: str) -> list[Path]:
         directory = mapping.get("directory", "") or "$PROJECT_DIR$"
         directory = directory.replace("$PROJECT_DIR$", project_path)
         resolved = Path(os.path.realpath(directory))
-        if resolved.exists():
+        if is_git_work_tree(resolved):
             roots.append(resolved)
 
     return roots
@@ -98,10 +111,22 @@ def git_roots_from_project(project_path: str) -> list[Path]:
 
 def git_roots_for_issue(project_path: str) -> list[Path]:
     roots = git_roots_from_project(project_path)
-    if roots:
-        return roots
-    current_root = Path(command_output(["git", "rev-parse", "--show-toplevel"]).strip()).resolve()
-    return [current_root]
+    if not roots:
+        roots = [Path(command_output(["git", "rev-parse", "--show-toplevel"]).strip()).resolve()]
+
+    seen: set[Path] = set(roots)
+    workspace_projects = optional_json_for_path("GET", "/projects", project_path) or []
+    for project in workspace_projects:
+        base_path = project.get("basePath", "")
+        if not base_path:
+            continue
+        resolved = Path(os.path.realpath(base_path))
+        for r in git_roots_from_project(str(resolved)):
+            if r not in seen:
+                seen.add(r)
+                roots.append(r)
+
+    return roots
 
 
 def list_local_branches(cwd: Path | None = None) -> list[str]:
@@ -359,7 +384,7 @@ def main(argv: list[str]) -> int:
     existing_task = find_issue_task(tasks, issue)
     task_reused = bool(existing_task)
     task_id = existing_task["id"] if existing_task else issue
-    task_summary = summary
+    task_summary = f"{issue} {summary}"
 
     existing_branch = None
     for git_root in git_roots:
@@ -388,7 +413,7 @@ def main(argv: list[str]) -> int:
         print("Dry run, no changes made:")
         print(f"Branch: {branch} ({branch_status})")
         print(f"Changelist: {changelist} ({changelist_status})")
-        print(f"Task: {task_id} - {task_summary} ({task_status})")
+        print(f"Task: {task_summary} ({task_status})")
         return 0
 
     idea_failed = False
@@ -421,36 +446,6 @@ def main(argv: list[str]) -> int:
                 note_failed_step(f"could not set default IDEA changelist '{changelist}'", exc)
                 idea_failed = True
 
-    if not (existing_task and existing_task.get("active")):
-        try:
-            request_json(
-                "POST",
-                "/tasks/open",
-                {"id": task_id, "summary": task_summary, "changelist": changelist, "branch": branch},
-            )
-        except Exception as exc:
-            try:
-                refreshed_tasks = request_json("GET", "/tasks")
-                matched_task = find_issue_task(refreshed_tasks, issue)
-                if matched_task:
-                    task_id = matched_task.get("id", issue)
-                    task_reused = True
-                    if not matched_task.get("active"):
-                        note_failed_step(f"could not open IDEA task '{task_id}'", exc)
-                        idea_failed = True
-                else:
-                    note_failed_step(f"could not open IDEA task '{task_id}'", exc)
-                    idea_failed = True
-            except Exception:
-                note_failed_step(f"could not open IDEA task '{task_id}'", exc)
-                idea_failed = True
-
-    if idea_failed:
-        print(
-            f"Note: IDEA integration uses http://localhost:63344 for project {project_path}",
-            file=sys.stderr,
-        )
-
     branch_reused = True
     for git_root in git_roots:
         try:
@@ -463,12 +458,43 @@ def main(argv: list[str]) -> int:
             detail = stderr or stdout or str(exc)
             print(f"Note: could not create branch '{branch}' in {git_root}: {detail}", file=sys.stderr)
 
+    try:
+        result = request_json(
+            "POST",
+            "/tasks/open",
+            {"id": task_id, "summary": task_summary, "changelist": changelist, "branch": branch},
+        )
+        if isinstance(result, dict) and result.get("warning"):
+            print(f"Note: {result['warning']}", file=sys.stderr)
+    except Exception as exc:
+        try:
+            refreshed_tasks = request_json("GET", "/tasks")
+            matched_task = find_issue_task(refreshed_tasks, issue)
+            if matched_task:
+                task_id = matched_task.get("id", issue)
+                task_reused = True
+                if not matched_task.get("active"):
+                    note_failed_step(f"could not open IDEA task '{task_id}'", exc)
+                    idea_failed = True
+            else:
+                note_failed_step(f"could not open IDEA task '{task_id}'", exc)
+                idea_failed = True
+        except Exception:
+            note_failed_step(f"could not open IDEA task '{task_id}'", exc)
+            idea_failed = True
+
+    if idea_failed:
+        print(
+            f"Note: IDEA integration uses http://localhost:63344 for project {project_path}",
+            file=sys.stderr,
+        )
+
     branch_status = "reused" if branch_reused else "created"
     changelist_status = "reused" if changelist_reused else "created"
     task_status = "reused" if task_reused else "created"
     print(f"Branch: {branch} ({branch_status})")
     print(f"Changelist: {changelist} ({changelist_status})")
-    print(f"Task: {task_id} - {task_summary} ({task_status})")
+    print(f"Task: {task_summary} ({task_status})")
     return 0
 
 
