@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Claude Code UserPromptSubmit + PreToolUse hook (~/.claude/settings.json).
 # Blocks when context exceeds the token limit and directs the agent to run /session-handoff.
+# Register for BOTH events: only UserPromptSubmit sees .prompt, so without it the flag file is
+# never armed and the session-handoff bypass below never fires.
 limit=150000
 handoff_skill=session-handoff
 
