@@ -16,9 +16,6 @@ call_lefthook()
   elif lefthook -h >/dev/null 2>&1
   then
     lefthook "$@"
-  elif /home/dan/Github/paseo/node_modules/lefthook-linux-arm64/bin/lefthook -h >/dev/null 2>&1
-  then
-    /home/dan/Github/paseo/node_modules/lefthook-linux-arm64/bin/lefthook "$@"
   else
     dir="$(git rev-parse --show-toplevel)"
     osArch=$(uname | tr '[:upper:]' '[:lower:]')
@@ -67,5 +64,22 @@ call_lefthook()
     fi
   fi
 }
+
+# Skip silently in repos that have no lefthook config (avoids the
+# "No config files ... have been found" notice in unrelated projects)
+lefthook_config_exists()
+{
+  for base in "$1/lefthook" "$1/.lefthook" "$1/.config/lefthook"; do
+    for ext in .yml .yaml .toml .json; do
+      [ -f "$base$ext" ] && return 0
+    done
+  done
+  return 1
+}
+
+dir="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -n "$dir" ] && ! lefthook_config_exists "$dir"; then
+  exit 0
+fi
 
 call_lefthook run "pre-commit" "$@"
