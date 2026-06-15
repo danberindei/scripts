@@ -1,5 +1,76 @@
-#!/usr/bin/env bash
-while IFS= read -r url; do
-    [[ -z "$url" ]] && continue
-    yt-dlp "$@" "$url"
-done
+#!/usr/bin/env python3
+import sys
+import subprocess
+
+PASTE_START = '[200~'
+PASTE_END   = '[201~'
+ESC = '\x1b'
+EOT = '\x04'  # Ctrl+D in cbreak mode
+
+
+def run_ytdlp(extra_args, url):
+    url = url.strip()
+    if not url:
+        return
+    result = subprocess.run(['yt-dlp'] + extra_args + [url])
+    if result.returncode != 0:
+        subprocess.run(['wget', '--content-disposition', url])
+
+
+def read_interactive(extra_args):
+    import termios, tty
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    sys.stdout.write('\x1b[?2004h')
+    sys.stdout.flush()
+
+    try:
+        tty.setcbreak(fd)
+        url = ''
+        esc_buf = None  # None = not in an escape sequence
+
+        while True:
+            ch = sys.stdin.read(1)
+            if not ch or ch == EOT:
+                if url:
+                    run_ytdlp(extra_args, url)
+                break
+
+            if esc_buf is not None:
+                esc_buf += ch
+                if esc_buf == PASTE_START:
+                    esc_buf = None
+                    url = ''
+                elif esc_buf == PASTE_END:
+                    esc_buf = None
+                    run_ytdlp(extra_args, url)
+                    url = ''
+                elif not PASTE_START.startswith(esc_buf) and not PASTE_END.startswith(esc_buf):
+                    url += ESC + esc_buf
+                    esc_buf = None
+            elif ch == ESC:
+                esc_buf = ''
+            elif ch in ('\n', '\r'):
+                if url:
+                    run_ytdlp(extra_args, url)
+                    url = ''
+            else:
+                url += ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write('\x1b[?2004l')
+        sys.stdout.flush()
+
+
+def main():
+    extra_args = sys.argv[1:]
+    if sys.stdin.isatty():
+        read_interactive(extra_args)
+    else:
+        for line in sys.stdin:
+            run_ytdlp(extra_args, line)
+
+
+if __name__ == '__main__':
+    main()
