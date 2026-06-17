@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Codex PreToolUse hook (~/.codex/hooks.json).
 # Blocks when context exceeds the token limit and directs the agent to run /session-handoff.
-limit=150000
+limit=170000
 handoff_skill=session-handoff
 
 input=$(cat)
