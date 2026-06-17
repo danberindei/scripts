@@ -18,13 +18,13 @@ if [[ -n "$session_id" ]]; then
 fi
 
 if [[ -n "$transcript" && -f "$transcript" ]]; then
-  total_tokens=$(tac "$transcript" | jq -Rn '
+  total_tokens=$(tac "$transcript" 2>/dev/null | jq -Rn '
     first(inputs | fromjson? | select(.type=="event_msg" and .payload.type=="token_count"))
-    | .payload.info.total_token_usage.total_tokens
+    | .payload.info.last_token_usage.total_tokens
   ' 2>/dev/null)
   if [[ "$total_tokens" =~ ^[0-9]+$ ]] && ((total_tokens > limit)); then
     # Allow /session-handoff invocations through regardless of context
-    last_msg=$(tac "$transcript" | jq -Rn '
+    last_msg=$(tac "$transcript" 2>/dev/null | jq -Rn '
       first(inputs | fromjson? | select(.type=="event_msg" and .payload.type=="user_message"))
       | .payload.message
     ' 2>/dev/null)
