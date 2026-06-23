@@ -13,7 +13,7 @@ config_dir="${1:-${CLAUDE_CONFIG_DIR:-${HOME}/.claude}}"
 
 CACHE_DIR="${XDG_RUNTIME_DIR:-${HOME}/.cache}/claude-pace"
 CACHE_FILE="${CACHE_DIR}/quota-hook-cache-$(basename "$config_dir")"
-CACHE_TTL=60
+CACHE_TTL=120
 CREDENTIALS="${config_dir}/.credentials.json"
 USAGE_URL="https://api.anthropic.com/api/oauth/usage"
 BETA_HEADER="oauth-2025-04-20"
