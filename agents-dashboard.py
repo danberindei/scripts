@@ -208,9 +208,6 @@ def load_data(data_dir: Path) -> pd.DataFrame:
 
     local_tz = datetime.now().astimezone().tzinfo
     df["ts"] = pd.to_datetime(df["ts"], format="ISO8601", utc=True).dt.tz_convert(local_tz).dt.tz_localize(None)
-    df["date"] = df["ts"].dt.floor("D")
-    df["hour"] = df["ts"].dt.floor("h")
-    df["minute"] = df["ts"].dt.floor("min")
 
     missing_cost_cols = [col for col in TOKEN_COST_COLS if col not in df.columns]
     if missing_cost_cols:
@@ -245,7 +242,7 @@ min_ts = df["ts"].min().to_pydatetime()
 max_ts = df["ts"].max().to_pydatetime()
 providers = sorted(df["provider"].unique())
 all_projects = sorted(df["project_short"].unique())
-grains = ["Day", "Hour", "Minute"]
+grains = ["1w", "1d", "1h", "30m", "15m", "5m", "1m"]
 
 qp = st.query_params
 
@@ -282,13 +279,15 @@ providers_off = set(qp.get_all("provider_off"))
 selected_providers = st.sidebar.multiselect("Provider", providers, default=[s for s in providers if s not in providers_off])
 selected_projects = st.sidebar.multiselect("Project (leave empty for all)", all_projects, default=_qp_list("project", all_projects) or [])
 
-grain_default = qp.get("grain", "Day")
-time_grain = st.sidebar.radio("Time granularity", grains, index=grains.index(grain_default) if grain_default in grains else 0)
+if "time_grain" not in st.session_state:
+    _g = qp.get("grain", "1d")
+    st.session_state["time_grain"] = _g if _g in grains else "1d"
+time_grain = st.sidebar.select_slider("Time granularity", options=grains, key="time_grain")
 
 
 # --- Persist sidebar filter state to query params ---
 # Done here (before any st.stop()) so the URL updates even when no data matches.
-# split_by is synced at the bottom since it's defined in the main content area.
+# split_dims is synced at the bottom since it's defined in the main content area.
 _sidebar_desired = {
     "start": str(start_date),
     "end": str(end_date),
@@ -315,9 +314,21 @@ if filtered.empty:
     st.warning("No events match the current filters.")
     st.stop()
 
-display = filtered
+display = filtered.copy()
 
-time_col = {"Day": "date", "Hour": "hour", "Minute": "minute"}[time_grain]
+grain_map = {
+    "1d": "D",
+    "1h": "h",
+    "30m": "30min",
+    "15m": "15min",
+    "5m": "5min",
+    "1m": "min",
+}
+if time_grain == "1w":
+    display["time_grain_ts"] = display["ts"].dt.to_period("W").dt.to_timestamp()
+else:
+    display["time_grain_ts"] = display["ts"].dt.floor(grain_map[time_grain])
+time_col = "time_grain_ts"
 
 # --- Summary metrics ---
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -370,56 +381,80 @@ with col_right:
 
 st.divider()
 
-# --- Cost breakdown over time ---
-st.subheader("Cost breakdown over time")
-split_options = ["Provider", "Project", "Provider + Project"]
-split_default = qp.get("split", "Provider")
-split_by = st.radio(
-    "Split by", split_options,
-    index=split_options.index(split_default) if split_default in split_options else 0,
-    horizontal=True,
-    key="split_by",
+# --- Unified cost over time ---
+st.subheader("Cost over time")
+
+DIM_OPTIONS = ["project", "provider", "model", "token type"]
+DIM_COLS = {
+    "project": "project_short",
+    "provider": "provider",
+    "model": "model",
+}
+TOKEN_TYPE_LABELS = {
+    "input_cost": "input",
+    "output_cost": "output",
+    "cache_write_cost": "cache_write",
+    "cache_read_cost": "cache_read",
+}
+
+split_dims_default = [d for d in qp.get_all("split_dims") if d in DIM_OPTIONS] or ["token type"]
+split_dims = st.multiselect(
+    "Split by",
+    DIM_OPTIONS,
+    default=split_dims_default,
+    max_selections=3,
+    key="split_dims",
 )
 
-if split_by == "Provider":
-    grp = "provider"
-    breakdown_data = display.copy()
-elif split_by == "Project":
-    grp = "project_short"
+chart_data = display.copy()
+
+if "project" in split_dims:
     proj_cost = display.groupby("project_short")["cost"].sum()
-    top = proj_cost[proj_cost >= proj_cost.sum() * 0.01].index
-    breakdown_data = display.copy()
-    breakdown_data[grp] = breakdown_data[grp].where(breakdown_data[grp].isin(top), other="(other)")
+    top_projects = proj_cost[proj_cost >= proj_cost.sum() * 0.01].index
+    chart_data["project_short"] = chart_data["project_short"].where(
+        chart_data["project_short"].isin(top_projects), other="(other)"
+    )
+
+extra_dim_cols = [DIM_COLS[d] for d in split_dims if d in DIM_COLS]
+
+if "token type" in split_dims:
+    id_vars = [time_col] + extra_dim_cols
+    chart_data = chart_data[id_vars + TOKEN_COST_COLS].melt(
+        id_vars=id_vars,
+        value_vars=TOKEN_COST_COLS,
+        var_name="_token_type",
+        value_name="cost",
+    )
+    chart_data["_token_type"] = chart_data["_token_type"].map(TOKEN_TYPE_LABELS)
+    group_cols = [time_col] + extra_dim_cols + ["_token_type"]
+    label_cols = extra_dim_cols + ["_token_type"]
 else:
-    grp = "_label"
-    proj_cost = display.groupby("project_short")["cost"].sum()
-    top = proj_cost[proj_cost >= proj_cost.sum() * 0.01].index
-    breakdown_data = display.copy()
-    proj = breakdown_data["project_short"].where(breakdown_data["project_short"].isin(top), other="(other)")
-    breakdown_data[grp] = proj + " / " + breakdown_data["provider"]
+    group_cols = [time_col] + extra_dim_cols
+    label_cols = extra_dim_cols
 
-by_time_grp = breakdown_data.groupby([time_col, grp])["cost"].sum().reset_index()
-fig = px.bar(by_time_grp, x=time_col, y="cost", color=grp,
-             labels={"cost": "Cost ($)", time_col: "", grp: ""})
-st.plotly_chart(fig, use_container_width=True)
+chart_data = chart_data.groupby(group_cols)["cost"].sum().reset_index()
 
-st.divider()
+if len(label_cols) == 0:
+    color_col = None
+elif len(label_cols) == 1:
+    color_col = label_cols[0]
+else:
+    chart_data["_label"] = chart_data[label_cols].apply(
+        lambda row: " / ".join(row.astype(str)), axis=1
+    )
+    color_col = "_label"
 
-# --- Token breakdown over time ---
-st.subheader("Token breakdown over time (cost-weighted)")
-token_cost_by_time = display.groupby(time_col)[TOKEN_COST_COLS].sum().reset_index()
-token_cost_melted = token_cost_by_time.melt(
-    id_vars=time_col,
-    value_vars=TOKEN_COST_COLS,
-    var_name="token_type",
-    value_name="cost",
+fig = px.bar(
+    chart_data, x=time_col, y="cost", color=color_col,
+    labels={"cost": "Cost ($)", time_col: "", color_col or "": ""},
 )
-token_cost_melted["token_type"] = token_cost_melted["token_type"].str.replace("_cost", "", regex=False)
-fig = px.bar(token_cost_melted, x=time_col, y="cost", color="token_type",
-             labels={"cost": "Cost ($)", time_col: ""})
+if color_col:
+    fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>%{x}<br>$%{y:.4f}<extra></extra>")
+else:
+    fig.update_traces(hovertemplate="%{x}<br>$%{y:.4f}<extra></extra>")
 st.plotly_chart(fig, use_container_width=True)
 
-# --- Persist split_by to query params ---
-# (sidebar params are synced earlier, before any st.stop())
-if qp.get("split") != split_by:
-    st.query_params["split"] = split_by
+# --- Persist split_dims to query params ---
+_desired_split_dims = sorted(split_dims)
+if sorted(qp.get_all("split_dims")) != _desired_split_dims:
+    st.query_params["split_dims"] = split_dims
