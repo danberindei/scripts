@@ -9,7 +9,7 @@ Usage:
 import json
 import subprocess
 import sys
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -260,18 +260,11 @@ def _qp_list(key, valid):
     vals = qp.get_all(key)
     return [v for v in vals if v in valid] or None
 
-def _parse_ts(s):
-    try:
-        ts = pd.Timestamp(s)
-        return None if ts is pd.NaT else ts.to_pydatetime()
-    except Exception:
-        return None
-
 today = datetime.now().astimezone().date()
 date_max = max(max_ts.date(), today)
 
 dc1, dc2 = st.sidebar.columns(2)
-start_date = dc1.date_input("Start date", value=_qp_date("start", min_ts.date()), min_value=min_ts.date(), max_value=date_max)
+start_date = dc1.date_input("Start date", value=_qp_date("start", today - timedelta(days=7)), min_value=min_ts.date(), max_value=date_max)
 end_date = dc2.date_input("End date", value=_qp_date("end", max_ts.date()), min_value=min_ts.date(), max_value=date_max)
 
 if st.sidebar.button("Refresh data"):
@@ -291,21 +284,7 @@ selected_projects = st.sidebar.multiselect("Project (leave empty for all)", all_
 
 grain_default = qp.get("grain", "Day")
 time_grain = st.sidebar.radio("Time granularity", grains, index=grains.index(grain_default) if grain_default in grains else 0)
-top_n = st.sidebar.slider("Top N projects", 5, 30, int(qp.get("top_n", 15)))
 
-# Zoom state (set by horizontal chart selection, persisted in query params)
-zoom_start = _parse_ts(qp.get("zoom_start"))
-zoom_end = _parse_ts(qp.get("zoom_end"))
-
-st.sidebar.divider()
-if zoom_start and zoom_end:
-    st.sidebar.caption(f"Zoom: {zoom_start.strftime('%Y-%m-%d %H:%M')} – {zoom_end.strftime('%Y-%m-%d %H:%M')}")
-    if st.sidebar.button("Clear zoom"):
-        del st.query_params["zoom_start"]
-        del st.query_params["zoom_end"]
-        st.rerun()
-else:
-    st.sidebar.caption("Drag horizontally on the chart to zoom.")
 
 # --- Persist sidebar filter state to query params ---
 # Done here (before any st.stop()) so the URL updates even when no data matches.
@@ -314,7 +293,6 @@ _sidebar_desired = {
     "start": str(start_date),
     "end": str(end_date),
     "grain": time_grain,
-    "top_n": str(top_n),
     "provider_off": [s for s in providers if s not in selected_providers],
     "project": selected_projects,
 }
@@ -337,12 +315,7 @@ if filtered.empty:
     st.warning("No events match the current filters.")
     st.stop()
 
-# Zoom applied as secondary filter — all charts and metrics follow it
-if zoom_start and zoom_end:
-    zm = (filtered["ts"] >= zoom_start) & (filtered["ts"] <= zoom_end)
-    display = filtered[zm] if zm.any() else filtered
-else:
-    display = filtered
+display = filtered
 
 time_col = {"Day": "date", "Hour": "hour", "Minute": "minute"}[time_grain]
 
@@ -356,48 +329,24 @@ c5.metric("Cache read tokens", f"{display['cache_read'].sum():,.0f}")
 
 st.divider()
 
-# --- Cost over time (drag horizontally to zoom) ---
+# --- Cost by project and by model ---
 col_left, col_right = st.columns(2)
 
 with col_left:
-    st.subheader("Cost over time")
-    by_time_source = filtered.groupby([time_col, "provider"])["cost"].sum().reset_index()
-    fig = px.line(by_time_source, x=time_col, y="cost", color="provider",
-                  labels={"cost": "Cost ($)", time_col: ""})
-    fig.update_layout(dragmode="select", selectdirection="h")
-    fig.update_yaxes(autorange=True)
-    if zoom_start and zoom_end:
-        fig.update_xaxes(range=[zoom_start, zoom_end])
-
-    event = st.plotly_chart(fig, on_select="rerun", use_container_width=True, key="cost_time")
-    if event and event.selection and event.selection.box:
-        box = event.selection.box[0]
-        if "x" in box and len(box["x"]) >= 2:
-            x0, x1 = sorted(pd.Timestamp(v) for v in box["x"])
-            new_zs = x0.strftime("%Y-%m-%dT%H:%M:%S")
-            new_ze = x1.strftime("%Y-%m-%dT%H:%M:%S")
-            if new_zs != qp.get("zoom_start") or new_ze != qp.get("zoom_end"):
-                st.query_params["zoom_start"] = new_zs
-                st.query_params["zoom_end"] = new_ze
-                st.rerun()
+    st.subheader("Cost by project")
+    by_project_pie = display.groupby("project_short")["cost"].sum().reset_index()
+    total_cost = by_project_pie["cost"].sum()
+    significant = by_project_pie["cost"] >= total_cost * 0.01
+    by_project_pie["project_short"] = by_project_pie["project_short"].where(significant, other="(other)")
+    by_project_pie = by_project_pie.groupby("project_short")["cost"].sum().reset_index()
+    fig = px.pie(by_project_pie, values="cost", names="project_short")
+    st.plotly_chart(fig, use_container_width=True)
 
 with col_right:
     st.subheader("Cost by model")
     by_model = display.groupby("model")["cost"].sum().reset_index()
     fig = px.pie(by_model, values="cost", names="model")
     st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-# --- Cost by project ---
-st.subheader(f"Top {top_n} projects by cost")
-by_project = display.groupby(["project_short", "provider"])["cost"].sum().reset_index()
-top_projects = by_project.groupby("project_short")["cost"].sum().nlargest(top_n).index
-by_project_top = by_project[by_project["project_short"].isin(top_projects)]
-fig = px.bar(by_project_top, x="cost", y="project_short", color="provider", orientation="h",
-             labels={"cost": "Cost ($)", "project_short": ""})
-fig.update_layout(yaxis={"categoryorder": "total ascending"})
-st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
@@ -417,12 +366,14 @@ if split_by == "Provider":
     breakdown_data = display.copy()
 elif split_by == "Project":
     grp = "project_short"
-    top = display.groupby("project_short")["cost"].sum().nlargest(top_n).index
+    proj_cost = display.groupby("project_short")["cost"].sum()
+    top = proj_cost[proj_cost >= proj_cost.sum() * 0.01].index
     breakdown_data = display.copy()
     breakdown_data[grp] = breakdown_data[grp].where(breakdown_data[grp].isin(top), other="(other)")
 else:
     grp = "_label"
-    top = display.groupby("project_short")["cost"].sum().nlargest(top_n).index
+    proj_cost = display.groupby("project_short")["cost"].sum()
+    top = proj_cost[proj_cost >= proj_cost.sum() * 0.01].index
     breakdown_data = display.copy()
     proj = breakdown_data["project_short"].where(breakdown_data["project_short"].isin(top), other="(other)")
     breakdown_data[grp] = proj + " / " + breakdown_data["provider"]
