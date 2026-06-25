@@ -14,7 +14,7 @@ def run_ytdlp(extra_args, url):
         return
     result = subprocess.run(['yt-dlp'] + extra_args + [url])
     if result.returncode != 0:
-        subprocess.run(['wget', '--no-clobber', '--content-disposition', url])
+        subprocess.run(['wget', '--no-clobber', '--content-disposition', '--limit-rate=2m', url])
 
 
 def read_interactive(extra_args):
