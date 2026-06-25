@@ -333,19 +333,39 @@ st.divider()
 col_left, col_right = st.columns(2)
 
 with col_left:
-    st.subheader("Cost by project")
     by_project_pie = display.groupby("project_short")["cost"].sum().reset_index()
     total_cost = by_project_pie["cost"].sum()
     significant = by_project_pie["cost"] >= total_cost * 0.01
     by_project_pie["project_short"] = by_project_pie["project_short"].where(significant, other="(other)")
     by_project_pie = by_project_pie.groupby("project_short")["cost"].sum().reset_index()
     fig = px.pie(by_project_pie, values="cost", names="project_short")
+    fig.update_traces(textposition="outside", textinfo="label+percent",
+                      hovertemplate="$%{value:.3f} (%{percent})<extra></extra>",
+                      rotation=90,
+                      domain=dict(x=[0.1, 0.9], y=[0.05, 0.9]))
+    fig.update_layout(
+        title=dict(text="Cost by project", x=0.5, xanchor="center", font=dict(size=14)),
+        showlegend=False,
+        height=280,
+        margin=dict(t=30, b=0, l=0, r=0),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 with col_right:
-    st.subheader("Cost by model")
     by_model = display.groupby("model")["cost"].sum().reset_index()
+    total_model_cost = by_model["cost"].sum()
+    by_model["model"] = by_model["model"].where(by_model["cost"] >= total_model_cost * 0.01, other="(other)")
+    by_model = by_model.groupby("model")["cost"].sum().reset_index()
     fig = px.pie(by_model, values="cost", names="model")
+    fig.update_traces(textposition="outside", textinfo="label+percent",
+                      hovertemplate="$%{value:.3f} (%{percent})<extra></extra>",
+                      domain=dict(x=[0.1, 0.9], y=[0.05, 0.9]))
+    fig.update_layout(
+        title=dict(text="Cost by model", x=0.5, xanchor="center", font=dict(size=14)),
+        showlegend=False,
+        height=280,
+        margin=dict(t=30, b=0, l=0, r=0),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
