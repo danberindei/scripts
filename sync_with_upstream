@@ -108,10 +108,6 @@ def is_rebase_needed(branch, release_branch):
   upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
   return upstream_only_commit != ''
 
-def has_local_only_commits(branch):
-  local_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s/%s..%s" % (upstream_repo, branch, branch))
-  return local_only_commit != ''
-
 def handle_release_branches():
   #print("Release branches are %s" % branches)
   for relbranch in release_branches:
@@ -119,17 +115,13 @@ def handle_release_branches():
       print("Synchronizing release branch %s" % relbranch)
       run_git("checkout --ignore-other-worktrees -q %s" % relbranch)
       try:
-        run_git("rebase -q %s/%s" % (upstream_repo, relbranch))
+        run_git("merge --ff-only -q %s/%s" % (upstream_repo, relbranch))
       except:
-        print("Rebase on upstream failed for %s" % relbranch)
+        print("Fast-forward on upstream failed for %s (local commits not in upstream?)" % relbranch)
         sys.exit(3)
     else:
       #print("Branch %s hasn't changed upstream" % branch)
       pass
-
-    if has_local_only_commits(relbranch):
-      print("Release branch %s has local commits not in upstream, aborting" % relbranch)
-      sys.exit(3)
 
     if upstream_repo != ORIGIN_REPO:
       run_git("push -q -f %s %s" % (ORIGIN_REPO, relbranch))
@@ -204,8 +196,7 @@ def rebase_topic_branch(branch, base_branch):
     print("Rebasing topic branch %s on top of %s" % (branch, base_branch))
     run_git("checkout --ignore-other-worktrees %s" % branch)
     try:
-      #run_git("rebase %s" % base_branch)
-      run_git("merge %s" % base_branch)
+      run_git("rebase %s" % base_branch)
     except:
       print("Rebase on upstream (%s) failed for %s" % (base_branch, branch))
       sys.exit(3)
