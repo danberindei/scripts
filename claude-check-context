@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code UserPromptSubmit + PreToolUse hook (~/.claude/settings.json).
 # Blocks when context exceeds the token limit and directs the agent to run /session-handoff.
-# Register for BOTH events: only UserPromptSubmit sees .prompt, so without it the flag file is
-# never armed and the session-handoff bypass below never fires.
 limit=170000
 handoff_skill=session-handoff
 
@@ -10,24 +8,21 @@ input=$(cat)
 transcript=$(echo "$input" | jq -r '.transcript_path // empty')
 prompt=$(echo "$input" | jq -r '.prompt // empty')
 session_id=$(echo "$input" | jq -r '.session_id // empty')
-tool_name=$(echo "$input" | jq -r '.tool_name // empty')
-tool_skill=$(echo "$input" | jq -r '.tool_input.skill // empty')
 
 if [[ -n "$session_id" ]]; then
   flag_file="/tmp/claude-${handoff_skill}-${session_id}"
 
-  # Allow session-handoff invocations through regardless of context
-  if [[ -n "$prompt" ]] && echo "$prompt" | grep -qi "$handoff_skill"; then
-    touch "$flag_file"
-    exit 0
+  if [[ -n "$prompt" ]]; then
+    # Clear the bypass at the start of each new prompt so it covers only the current turn.
+    rm -f "$flag_file"
+    # Allow "session handoff" or "ignore context limit" prompts through regardless of context.
+    if echo "$prompt" | grep -Ei "session.handoff|ignore context limit" > /dev/null; then
+      touch "$flag_file"
+      exit 0
+    fi
   fi
 
-  # Allow Skill tool calls invoking session-handoff through regardless of context
-  if [[ "$tool_name" == "Skill" ]] && echo "$tool_skill" | grep -qi "$handoff_skill"; then
-    exit 0
-  fi
-
-  # Allow tool calls that are part of an in-progress session-handoff
+  # Allow tool calls within the bypassed turn through.
   if [[ -f "$flag_file" ]]; then
     exit 0
   fi

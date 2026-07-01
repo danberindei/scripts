@@ -5,9 +5,9 @@
 #   red when remainingPercent < expectedRemainingPercent * 0.5
 #
 # Caches the API response for 60s to avoid hammering the endpoint.
-# User bypass: type "ignore-quota" in a message to disable the check for that session.
+# User bypass: type "ignore quota", "continue in X min", or "snooze for Xh" to disable the check for that session.
 
-bypass_keyword=ignore-quota
+bypass_pattern="ignore quota|continue in [0-9]+|snooze for [0-9.]+"
 
 config_dir="${1:-${CLAUDE_CONFIG_DIR:-${HOME}/.claude}}"
 
@@ -25,10 +25,10 @@ session_id=$(echo "$input" | jq -r '.session_id // empty')
 prompt=$(echo "$input" | jq -r '.prompt // empty')
 
 if [[ -n "$session_id" ]]; then
-  flag_file="/tmp/claude-${bypass_keyword}-${session_id}"
+  flag_file="/tmp/claude-bypass-quota-${session_id}"
 
   # UserPromptSubmit: arm the bypass flag if the user typed the keyword.
-  if [[ -n "$prompt" ]] && echo "$prompt" | grep -qi "$bypass_keyword"; then
+  if [[ -n "$prompt" ]] && echo "$prompt" | grep -Ei "$bypass_pattern"; then
     touch "$flag_file"
     exit 0
   fi

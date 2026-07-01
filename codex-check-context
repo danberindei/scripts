@@ -23,12 +23,12 @@ if [[ -n "$transcript" && -f "$transcript" ]]; then
     | .payload.info.last_token_usage.total_tokens
   ' 2>/dev/null)
   if [[ "$total_tokens" =~ ^[0-9]+$ ]] && ((total_tokens > limit)); then
-    # Allow /session-handoff invocations through regardless of context
+    # Allow /session-handoff or "ignore context limit" invocations through regardless of context
     last_msg=$(tac "$transcript" 2>/dev/null | jq -Rn '
       first(inputs | fromjson? | select(.type=="event_msg" and .payload.type=="user_message"))
       | .payload.message
     ' 2>/dev/null)
-    if echo "$last_msg" | grep -qi "$handoff_skill"; then
+    if echo "$last_msg" | grep -Ei "$handoff_skill|ignore context limit"; then
       [[ -n "$session_id" ]] && touch "$flag_file"
       exit 0
     fi
