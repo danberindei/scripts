@@ -1,99 +1,55 @@
 #!/usr/bin/env python3
-# Open the project in IntelliJ, then raise its window.
+# Open a project in IntelliJ IDEA and raise its window on Wayland.
 #
-# On Wayland a backgrounded IDE cannot focus itself, and the `idea` launcher only
-# forwards "open this" to the running instance over a socket and exits, so nothing
-# brings the window forward. IdeaCli (a LivePlugin HTTP server in the IDE) resolves
-# the project window title; this wrapper then asks the Switchboard GNOME Shell
-# extension to raise it by ID -- which bypasses focus-stealing prevention with no
-# token. See ~/D/IntelliJLivePlugin/IdeaCli/README.md.
-import json
+# On Wayland a backgrounded IDE cannot focus itself, and the `idea` launcher
+# only forwards "open this" to the running instance over a socket and exits,
+# so nothing brings the window forward.  wl-focus asks the Switchboard
+# GNOME Shell extension to raise the window by ID, bypassing focus-stealing
+# prevention.
 import os
+import re
 import subprocess
 import sys
-import time
-import urllib.parse
-import urllib.request
 
 args = sys.argv[1:]
-self_real = os.path.realpath(__file__)
-idea = next(
-    os.path.join(d, "idea")
-    for d in os.environ.get("PATH", "").split(":")
-    if os.path.realpath(os.path.join(d, "idea")) != self_real
-    and os.path.isfile(os.path.join(d, "idea"))
-)
 
-target = next((a for a in reversed(args) if not a.startswith("-")), None)
+def non_option_paths(argv):
+    paths = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in {"--line", "-l"}:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        paths.append(arg)
+    return paths
+
+
+def choose_target(argv):
+    paths = non_option_paths(argv)
+    for path in paths:
+        if os.path.isdir(path) and os.path.isdir(os.path.join(path, ".idea")):
+            return path
+    return paths[0] if paths else None
+
+
+target = choose_target(args)
 if not target:
-    subprocess.run([idea] + args)
+    subprocess.run(["wl-focus", "--skip-realpath", os.path.realpath(__file__), "--", "idea"] + args)
     sys.exit(0)
 
-encoded = urllib.parse.quote(target, safe="")
-url = f"http://localhost:63344/projects?path={encoded}"
+project_name = os.path.basename(os.path.abspath(target))
+title_regex = r"^" + re.escape(project_name) + r"\s+[-\u2013]\s+.*"
 
-GDBUS = ["gdbus", "call", "--session",
-         "--dest", "org.gnome.Shell.Switchboard",
-         "--object-path", "/org/gnome/Shell/Switchboard"]
-
-
-def get_title():
-    try:
-        with urllib.request.urlopen(url, timeout=1) as r:
-            data = json.loads(r.read())
-            if data and data[0].get("title"):
-                return data[0]["title"]
-    except Exception:
-        pass
-    return None
-
-
-def get_win_id(title):
-    try:
-        raw = subprocess.check_output(
-            GDBUS + ["--method", "org.gnome.Shell.Switchboard.GetWindows"],
-            stderr=subprocess.DEVNULL).decode().strip()
-        # gdbus wraps the value in a GVariant tuple: ("...",)
-        # raw[1:-2] strips ( and ,) leaving a JSON-encoded string; decode twice.
-        for w in json.loads(json.loads(raw[1:-2])):
-            if w.get("wm_class") == "jetbrains-idea" and w.get("title") == title:
-                return w["id"]
-    except Exception:
-        pass
-    return None
-
-
-title = get_title()
-if title:
-    win_id = get_win_id(title)
-    if win_id is not None:
-        subprocess.run(GDBUS + ["--method", "org.gnome.Shell.Switchboard.FocusWindow", str(win_id)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        sys.exit(0)
-
-subprocess.run([idea] + args)
-
-title = None
-for _ in range(20):
-    title = get_title()
-    if title:
-        break
-    time.sleep(0.1)
-
-if not title:
-    print(f"idea-focus: IdeaCli did not return a title for {target}", file=sys.stderr)
-    sys.exit(1)
-
-win_id = None
-for _ in range(10):
-    win_id = get_win_id(title)
-    if win_id is not None:
-        break
-    time.sleep(0.1)
-
-if win_id is None:
-    print(f"idea-focus: no Switchboard window with title {title!r}", file=sys.stderr)
-    sys.exit(1)
-
-subprocess.run(GDBUS + ["--method", "org.gnome.Shell.Switchboard.FocusWindow", str(win_id)],
-               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+subprocess.run([
+    "wl-focus",
+    "--wm-class", "jetbrains-idea",
+    "--title-regex", title_regex,
+    "--wait", "10",
+    "--skip-realpath", os.path.realpath(__file__),
+    "--", "idea",
+] + args)

@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+# wl-focus: raise a Wayland window via the Switchboard GNOME Shell extension.
+# Finds the first window matching --wm-class and --title-regex (Python regex).
+# If none found and a command is given, runs it and waits for a matching window.
+# With --skip-realpath, resolves cmd[0] through PATH skipping that realpath
+# (useful for wrapper scripts that want to invoke the real binary they shadow).
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+from jeepney import DBusAddress, new_method_call
+from jeepney.io.blocking import open_dbus_connection
+
+SWITCHBOARD = DBusAddress(
+    "/org/gnome/Shell/Switchboard",
+    bus_name="org.gnome.Shell.Switchboard",
+    interface="org.gnome.Shell.Switchboard",
+)
+
+
+def resolve_cmd(name, skip_realpath):
+    if os.sep in name or not skip_realpath:
+        return name
+    for d in os.environ.get("PATH", "").split(":"):
+        candidate = os.path.join(d, name)
+        if os.path.isfile(candidate) and os.path.realpath(candidate) != skip_realpath:
+            return candidate
+    return name
+
+
+def get_windows(conn):
+    # Switchboard returns the window list as a JSON-encoded string (GetWindows
+    # is typed `out s`), so the reply body carries one native str to decode.
+    try:
+        reply = conn.send_and_get_reply(new_method_call(SWITCHBOARD, "GetWindows"))
+        return json.loads(reply.body[0])
+    except Exception:
+        return []
+
+
+def find_win_id(conn, wm_class, title_pattern):
+    for w in get_windows(conn):
+        if w.get("wm_class") == wm_class and title_pattern.search(w.get("title", "")):
+            return w.get("id")
+    return None
+
+
+def focus(conn, win_id):
+    # FocusWindow is typed `in u windowId`; signature "u" marshals the uint32.
+    conn.send_and_get_reply(new_method_call(SWITCHBOARD, "FocusWindow", "u", (win_id,)))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Raise a Wayland window matching wm_class and a title regex.")
+    parser.add_argument("--wm-class", help="WM_CLASS of the target application")
+    parser.add_argument("--title-regex", help="Python regex matched against window title")
+    parser.add_argument("--wait", type=float, default=5.0, metavar="SECS",
+                        help="seconds to wait for a window to appear after launching (default: 5)")
+    parser.add_argument("--skip-realpath", metavar="PATH",
+                        help="realpath to skip when resolving cmd[0] through PATH")
+    parser.add_argument("cmd", nargs="*", help="command to run if no matching window exists")
+    args = parser.parse_args()
+
+    cmd = args.cmd
+    if cmd:
+        cmd = [resolve_cmd(cmd[0], args.skip_realpath)] + cmd[1:]
+
+    if not args.title_regex:
+        if cmd:
+            os.execv(cmd[0], cmd)
+        return
+
+    title_pattern = re.compile(args.title_regex)
+    conn = open_dbus_connection(bus="SESSION")
+
+    win_id = find_win_id(conn, args.wm_class, title_pattern)
+    if win_id is not None:
+        focus(conn, win_id)
+        return
+
+    if not cmd:
+        print(f"wl-focus: no window found for wm_class={args.wm_class!r} "
+              f"title_regex={args.title_regex!r}", file=sys.stderr)
+        sys.exit(1)
+
+    subprocess.Popen(cmd)
+
+    deadline = time.monotonic() + args.wait
+    while time.monotonic() < deadline:
+        win_id = find_win_id(conn, args.wm_class, title_pattern)
+        if win_id is not None:
+            focus(conn, win_id)
+            return
+        time.sleep(0.1)
+
+    print(f"wl-focus: no window appeared for wm_class={args.wm_class!r} "
+          f"title_regex={args.title_regex!r} within {args.wait}s", file=sys.stderr)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
