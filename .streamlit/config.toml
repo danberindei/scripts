@@ -1,0 +1,4 @@
+[theme]
+# ColorBrewer "Paired" dark blue - matches the pie palette and gives high-contrast
+# widget accents (selected multiselect chips, slider, buttons).
+primaryColor = "#1f78b4"

@@ -16,6 +16,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from plotly.colors import sample_colorscale
 
 from agent_usage_common import calc_cost_breakdown, load_pricing_db, short_project
 
@@ -24,6 +25,47 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TOKEN_COST_COLS = ["input_cost", "output_cost", "cache_write_cost", "cache_read_cost"]
 WORKTREE_MAP_FILE = "paseo-worktrees.jsonl"
 WORKTREE_SCRIPT = SCRIPT_DIR / "paseo-worktrees.py"
+
+# Each provider gets one ColorBrewer single-hue sequential scale; the keys within a
+# provider (projects or models) are sampled as evenly-spaced swatches from that
+# scale. These scales are perceptually tuned, so the shades read as one color family
+# without hand-rolled HLS math.
+PROVIDER_SCALES = [
+    px.colors.sequential.Blues,
+    px.colors.sequential.Oranges,
+    px.colors.sequential.Greens,
+    px.colors.sequential.Reds,
+    px.colors.sequential.Purples,
+    px.colors.sequential.BuPu,
+    px.colors.sequential.YlGn,
+    px.colors.sequential.Greys,
+]
+# Sample within this sub-range of each scale to avoid the near-white and near-black
+# extremes at the ends.
+_SCALE_LO = 0.35
+_SCALE_HI = 0.85
+
+# ColorBrewer "Paired" qualitative palette (12 colors, light/dark pairs). Plotly
+# doesn't ship this one, so define it explicitly. Used for the pie slices.
+PAIRED = [
+    "#a6cee3", "#1f78b4", "#b2df8a", "#33a02c",
+    "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00",
+    "#cab2d6", "#6a3d9a", "#ffff99", "#b15928",
+]
+
+
+def provider_scale_map(providers):
+    """Assign each provider (sorted) a stable sequential scale, shared across charts."""
+    ordered = sorted(providers)
+    return {p: PROVIDER_SCALES[i % len(PROVIDER_SCALES)] for i, p in enumerate(ordered)}
+
+
+def _provider_shades(scale, n):
+    """Return n colors sampled evenly from a sequential scale, light to dark."""
+    if n == 1:
+        return sample_colorscale(scale, [0.6])
+    positions = [_SCALE_LO + (_SCALE_HI - _SCALE_LO) * i / (n - 1) for i in range(n)]
+    return sample_colorscale(scale, positions)
 
 
 @lru_cache(maxsize=512)
@@ -242,7 +284,11 @@ min_ts = df["ts"].min().to_pydatetime()
 max_ts = df["ts"].max().to_pydatetime()
 providers = sorted(df["provider"].unique())
 all_projects = sorted(df["project_short"].unique())
+MINUTES_PER_DAY = 24 * 60
+# Cap on the number of bars the "cost over time" chart auto-picks a grain for.
+MAX_BUCKETS = MINUTES_PER_DAY
 grains = ["1w", "1d", "1h", "30m", "15m", "5m", "1m"]
+GRAIN_MINUTES = {"1w": 10080, "1d": MINUTES_PER_DAY, "1h": 60, "30m": 30, "15m": 15, "5m": 5, "1m": 1}
 
 qp = st.query_params
 
@@ -279,9 +325,30 @@ providers_off = set(qp.get_all("provider_off"))
 selected_providers = st.sidebar.multiselect("Provider", providers, default=[s for s in providers if s not in providers_off])
 selected_projects = st.sidebar.multiselect("Project (leave empty for all)", all_projects, default=_qp_list("project", all_projects) or [])
 
+_range_key = (str(start_date), str(end_date))
 if "time_grain" not in st.session_state:
     _g = qp.get("grain", "1d")
     st.session_state["time_grain"] = _g if _g in grains else "1d"
+    st.session_state["_grain_range_key"] = _range_key
+
+# Auto-pick a readable grain only when the date range changes; manual grain
+# changes are always respected. Uses the theoretical bucket count over the span
+# (an upper bound on the actual data points), which keeps this deterministic and
+# independent of filtering.
+_span_min = ((end_date - start_date).days + 1) * MINUTES_PER_DAY
+_grain_points = lambda g: _span_min / GRAIN_MINUTES[g]
+if st.session_state.get("_grain_range_key") != _range_key:
+    st.session_state["_grain_range_key"] = _range_key
+    current_grain = st.session_state["time_grain"]
+    idx = grains.index(current_grain)
+    # _grain_points is monotonic in the grain index, so the fitting grains form a
+    # contiguous range: keep the current grain if it fits, else clamp toward the band.
+    band = [i for i, g in enumerate(grains) if 2 <= _grain_points(g) <= MAX_BUCKETS]
+    if band:
+        # Clamp is a no-op when idx is already in band.
+        st.session_state["time_grain"] = grains[min(max(idx, band[0]), band[-1])]
+    else:
+        st.session_state["time_grain"] = "1m" if _grain_points("1m") < 2 else "1w"
 time_grain = st.sidebar.select_slider("Time granularity", options=grains, key="time_grain")
 
 
@@ -316,6 +383,10 @@ if filtered.empty:
 
 display = filtered.copy()
 
+# Shared provider->scale mapping so the pies and the cost-over-time bars use the
+# same hue per provider.
+scale_of_provider = provider_scale_map(display["provider"].unique())
+
 grain_map = {
     "1d": "D",
     "1h": "h",
@@ -349,7 +420,8 @@ with col_left:
     significant = by_project_pie["cost"] >= total_cost * 0.01
     by_project_pie["project_short"] = by_project_pie["project_short"].where(significant, other="(other)")
     by_project_pie = by_project_pie.groupby("project_short")["cost"].sum().reset_index()
-    fig = px.pie(by_project_pie, values="cost", names="project_short")
+    fig = px.pie(by_project_pie, values="cost", names="project_short",
+                 color_discrete_sequence=PAIRED)
     fig.update_traces(textposition="outside", textinfo="label+percent",
                       hovertemplate="$%{value:.3f} (%{percent})<extra></extra>",
                       rotation=90,
@@ -367,7 +439,8 @@ with col_right:
     total_model_cost = by_model["cost"].sum()
     by_model["model"] = by_model["model"].where(by_model["cost"] >= total_model_cost * 0.01, other="(other)")
     by_model = by_model.groupby("model")["cost"].sum().reset_index()
-    fig = px.pie(by_model, values="cost", names="model")
+    fig = px.pie(by_model, values="cost", names="model",
+                 color_discrete_sequence=PAIRED)
     fig.update_traces(textposition="outside", textinfo="label+percent",
                       hovertemplate="$%{value:.3f} (%{percent})<extra></extra>",
                       domain=dict(x=[0.1, 0.9], y=[0.05, 0.9]))
@@ -397,7 +470,8 @@ TOKEN_TYPE_LABELS = {
     "cache_read_cost": "cache_read",
 }
 
-split_dims_default = [d for d in qp.get_all("split_dims") if d in DIM_OPTIONS] or ["token type"]
+
+split_dims_default = [d for d in qp.get_all("split_dims") if d in DIM_OPTIONS] or ["provider", "project"]
 split_dims = st.multiselect(
     "Split by",
     DIM_OPTIONS,
@@ -444,8 +518,27 @@ else:
     )
     color_col = "_label"
 
+# When provider is combined with other dims, give each provider one hue family and
+# a distinct shade per sub-label so related series read as shades of one color.
+color_map = None
+label_order = None
+if color_col == "_label" and "provider" in label_cols:
+    sub_cols = [c for c in label_cols if c != "provider"]
+    providers_in_chart = sorted(chart_data["provider"].unique())
+    combos = chart_data[["provider", "_label"] + sub_cols].drop_duplicates()
+    color_map = {}
+    label_order = []
+    for prov in providers_in_chart:
+        subs = combos[combos["provider"] == prov].sort_values("_label")
+        shades = _provider_shades(scale_of_provider[prov], len(subs))
+        for shade, (_, row) in zip(shades, subs.iterrows()):
+            color_map[row["_label"]] = shade
+            label_order.append(row["_label"])
+
 fig = px.bar(
     chart_data, x=time_col, y="cost", color=color_col,
+    color_discrete_map=color_map or {},
+    category_orders={color_col: label_order} if label_order else {},
     labels={"cost": "Cost ($)", time_col: "", color_col or "": ""},
 )
 if color_col:
