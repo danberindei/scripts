@@ -411,8 +411,8 @@ c5.metric("Cache read tokens", f"{display['cache_read'].sum():,.0f}")
 
 st.divider()
 
-# --- Cost by project and by model ---
-col_left, col_right = st.columns(2)
+# --- Cost by project, provider, and model ---
+col_left, col_mid, col_right = st.columns(3)
 
 with col_left:
     by_project_pie = display.groupby("project_short")["cost"].sum().reset_index()
@@ -434,6 +434,25 @@ with col_left:
     )
     st.plotly_chart(fig, use_container_width=True)
 
+with col_mid:
+    by_provider = display.groupby("provider")["cost"].sum().reset_index()
+    provider_colors = {
+        p: _provider_shades(scale_of_provider[p], 1)[0] for p in by_provider["provider"]
+    }
+    fig = px.pie(by_provider, values="cost", names="provider",
+                 color="provider", color_discrete_map=provider_colors)
+    fig.update_traces(textposition="outside", textinfo="label+percent",
+                      hovertemplate="$%{value:.3f} (%{percent})<extra></extra>",
+                      rotation=90,
+                      domain=dict(x=[0.1, 0.9], y=[0.05, 0.9]))
+    fig.update_layout(
+        title=dict(text="Cost by provider", x=0.5, xanchor="center", font=dict(size=14)),
+        showlegend=False,
+        height=280,
+        margin=dict(t=30, b=0, l=0, r=0),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
 with col_right:
     by_model = display.groupby("model")["cost"].sum().reset_index()
     total_model_cost = by_model["cost"].sum()
@@ -443,6 +462,7 @@ with col_right:
                  color_discrete_sequence=PAIRED)
     fig.update_traces(textposition="outside", textinfo="label+percent",
                       hovertemplate="$%{value:.3f} (%{percent})<extra></extra>",
+                      rotation=90,
                       domain=dict(x=[0.1, 0.9], y=[0.05, 0.9]))
     fig.update_layout(
         title=dict(text="Cost by model", x=0.5, xanchor="center", font=dict(size=14)),
