@@ -20,6 +20,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from dashboard_ui import persist_query_params, seed_widget_state
+
 DEFAULT_DATA_DIR = Path(os.environ.get("TIME_DATA_DIR", Path.home() / "Performek" / "work" / "time"))
 
 # ColorBrewer "Paired" qualitative palette (matches agents-dashboard.py) for the
@@ -41,12 +43,14 @@ NULL_TICKET_LABELS = {
 }
 
 # Keyword sub-buckets for work entries that carry no ticket, so the overhead isn't
-# one opaque "(untracked)" slice. First match wins, so keep specific groups ahead of
-# broad ones (e.g. "time-track" tooling reads as workspace, not generic tooling).
+# one opaque "(untracked)" slice. First match wins. Building the time-tracker is tool
+# work, so "time-track"/"time track" live in (tooling); (notes) is the daily-notes
+# habit only. (notes) precedes (tooling) so an entry mentioning both notes and time
+# tracking counts as the habit, while pure time-tracker building lands in tooling.
 UNTRACKED_BUCKETS = [
     ("(comms)", ("comms", "slack", "gmail", "email")),
-    ("(workspace/notes)", ("time-track", "time track", "notes", "workspace", "admin", "recollection")),
-    ("(tooling)", ("dashboard", "kitty", "opensearch", "token", "monitor", "skill", "idea-jira", "plugin", "tool")),
+    ("(notes)", ("notes",)),
+    ("(tooling)", ("time-track", "time track", "dashboard", "kitty", "opensearch", "token", "monitor", "skill", "idea-jira", "plugin", "tool")),
     ("(env/setup)", ("paseo", "ide", "intellij", "terminal", "setup", "config")),
     ("(ops)", ("memory", "swap", "deploy", "oper")),
 ]
@@ -82,6 +86,41 @@ def resolve_ticket(kind: str, ticket, meeting_ticket, comment: str = "") -> str:
 def attribution_of(ticket_label: str) -> str:
     """Ticketed if the resolved label is a real ticket, else ticketless overhead."""
     return "ticketed" if TICKET_RE.match(ticket_label) else "ticketless"
+
+
+def stacked_bar(data, cat_col, cat_order, stack_col, stack_order, horizontal):
+    """Build a stacked bar chart whose x/y axes swap with the orientation toggle.
+
+    ``cat_col`` is the primary axis (one bar per value, ordered by ``cat_order``);
+    ``stack_col`` is the stacked series/color (or None for single-color bars).
+    Horizontal puts ``cat_col`` on y and hours on x; vertical swaps them. Horizontal
+    mode grows ~28px per bar so long label lists stay legible; vertical uses a fixed
+    height. The category axis is forced categorical so ISO date labels aren't auto-typed
+    as a date axis and thinned.
+    """
+    orders = {cat_col: cat_order}
+    labels = {"hours": "Hours", cat_col: ""}
+    if stack_col:
+        labels[stack_col] = ""
+        # Only pin the stack order when one is given; px chokes on a None order value.
+        if stack_order is not None:
+            orders[stack_col] = stack_order
+    if horizontal:
+        x, y, orient = "hours", cat_col, "h"
+    else:
+        x, y, orient = cat_col, "hours", "v"
+    fig = px.bar(data, x=x, y=y, color=stack_col, orientation=orient,
+                 color_discrete_sequence=PAIRED, category_orders=orders, labels=labels)
+    cat_ref, hrs_ref = ("%{y}", "%{x:.1f}") if horizontal else ("%{x}", "%{y:.1f}")
+    if stack_col:
+        fig.update_traces(hovertemplate=f"<b>%{{fullData.name}}</b><br>{cat_ref}<br>{hrs_ref} h<extra></extra>")
+    else:
+        fig.update_traces(hovertemplate=f"{cat_ref}<br>{hrs_ref} h<extra></extra>")
+    if horizontal:
+        fig.update_layout(height=max(400, len(cat_order) * 28), yaxis=dict(type="category"))
+    else:
+        fig.update_layout(height=500, xaxis=dict(type="category"))
+    return fig
 
 
 @st.cache_data
@@ -153,26 +192,31 @@ def main() -> None:
         vals = [v for v in qp.get_all(key) if v in valid]
         return vals or None
 
+    # Every control is bound to session_state via key= and seeded once from the query
+    # params, rather than fed value=/default= each rerun. A recomputed value= fights the
+    # query-param write-back below (the widget snaps back mid-change), which is the
+    # choppiness the grain slider showed. Keys/params are t_-prefixed and page-specific:
+    # this app is one st.navigation instance whose session_state and query params are
+    # shared across pages, so unprefixed names would collide with the agents page (whose
+    # split-by options and finer grains aren't valid here).
     dc1, dc2 = st.sidebar.columns(2)
-    default_start = max(min_date, max_date - timedelta(days=30))
-    start_date = dc1.date_input("Start date", value=_qp_date("start", default_start),
-                                min_value=min_date, max_value=max_date)
-    end_date = dc2.date_input("End date", value=_qp_date("end", max_date),
-                              min_value=min_date, max_value=max_date)
+    default_start = max(min_date, max_date - timedelta(days=7))
+    seed_widget_state("t_start", _qp_date("t_start", default_start))
+    seed_widget_state("t_end", _qp_date("t_end", max_date))
+    start_date = dc1.date_input("Start date", min_value=min_date, max_value=max_date, key="t_start")
+    end_date = dc2.date_input("End date", min_value=min_date, max_value=max_date, key="t_end")
 
-    # Same widget/label/vocabulary as agents-dashboard.py's grain control, so the two
-    # pages feel consistent and can share the "grain" query param. Time entries are
-    # day-grained, so only the 1w/1d subset is meaningful here. Read defensively: a
-    # finer grain the other page set (e.g. 1h) isn't a valid option, so fall back to 1d.
+    # Time entries are day-grained, so only the 1w/1d subset is meaningful here.
     grain_opts = ["1w", "1d"]
-    grain_default = qp.get("grain", "1d")
-    if grain_default not in grain_opts:
-        grain_default = "1d"
-    grain = st.sidebar.select_slider("Time granularity", options=grain_opts, value=grain_default)
+    _g = qp.get("t_grain", "1d")
+    seed_widget_state("t_grain", _g if _g in grain_opts else "1d")
+    grain = st.sidebar.select_slider("Time granularity", options=grain_opts, key="t_grain")
 
-    selected_kinds = st.sidebar.multiselect("Kind", all_kinds, default=_qp_list("kind", all_kinds) or all_kinds)
-    selected_tickets = st.sidebar.multiselect("Ticket (leave empty for all)", all_tickets,
-                                              default=_qp_list("ticket", all_tickets) or [])
+    # Default to every kind except "personal" so the charts open on work-relevant time.
+    seed_widget_state("t_kind", _qp_list("t_kind", all_kinds) or [k for k in all_kinds if k != "personal"])
+    selected_kinds = st.sidebar.multiselect("Kind", all_kinds, key="t_kind")
+    seed_widget_state("t_ticket", _qp_list("t_ticket", all_tickets) or [])
+    selected_tickets = st.sidebar.multiselect("Ticket (leave empty for all)", all_tickets, key="t_ticket")
 
     # --- Filter ---
     mask = ((df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)
@@ -182,18 +226,13 @@ def main() -> None:
     display = df[mask].copy()
 
     # --- Persist sidebar state to query params ---
-    _sidebar_desired = {
-        "start": str(start_date),
-        "end": str(end_date),
-        "grain": grain,
-        "kind": list(selected_kinds) if selected_kinds != all_kinds else [],
-        "ticket": selected_tickets,
-    }
-    for _k, _v in _sidebar_desired.items():
-        _current = sorted(qp.get_all(_k))
-        _target = sorted(_v if isinstance(_v, list) else [_v])
-        if _current != _target:
-            st.query_params[_k] = _v
+    persist_query_params({
+        "t_start": str(start_date),
+        "t_end": str(end_date),
+        "t_grain": grain,
+        "t_kind": selected_kinds,
+        "t_ticket": selected_tickets,
+    })
 
     if display.empty:
         st.warning("No entries match the current filters.")
@@ -218,18 +257,21 @@ def main() -> None:
 
     st.divider()
 
-    # --- Hours over time, split by chosen dimensions ---
-    st.subheader("Hours over time")
+    # --- Hours split by chosen dimensions; both charts share one axis-orientation toggle ---
+    ctrl1, ctrl2 = st.columns([3, 2])
+    seed_widget_state("t_split_dims", [d for d in qp.get_all("t_split_dims") if d in DIM_OPTIONS] or ["ticket"])
+    split_dims = ctrl1.multiselect("Split by", DIM_OPTIONS, max_selections=len(DIM_OPTIONS), key="t_split_dims")
 
-    split_dims_default = [d for d in qp.get_all("split_dims") if d in DIM_OPTIONS] or ["kind"]
-    split_dims = st.multiselect("Split by", DIM_OPTIONS, default=split_dims_default,
-                                max_selections=len(DIM_OPTIONS), key="split_dims")
+    orient_opts = ["Horizontal", "Vertical"]
+    _o = qp.get("t_orient", "Horizontal")
+    seed_widget_state("t_orient", _o if _o in orient_opts else "Horizontal")
+    orient = ctrl2.radio("Bar orientation", orient_opts, key="t_orient", horizontal=True)
+    horizontal = orient == "Horizontal"
 
     group_cols = ["bucket"] + split_dims
     chart_data = display.groupby(group_cols)["hours"].sum().reset_index()
-    # A categorical y-axis of date strings forces one labeled row per bucket; a
-    # continuous date axis auto-thins ticks (~weekly) and leaves weekend gaps.
     chart_data["bucket_label"] = chart_data["bucket"].dt.strftime("%Y-%m-%d")
+    # Order the time buckets chronologically so segments/rows read oldest-to-newest.
     bucket_order = [b.strftime("%Y-%m-%d") for b in sorted(chart_data["bucket"].unique())]
 
     if not split_dims:
@@ -240,46 +282,39 @@ def main() -> None:
         chart_data["_label"] = chart_data[split_dims].apply(lambda row: " / ".join(row.astype(str)), axis=1)
         color_col = "_label"
 
-    fig = px.bar(chart_data, x="hours", y="bucket_label", color=color_col, orientation="h",
-                 color_discrete_sequence=PAIRED,
-                 category_orders={"bucket_label": bucket_order},
-                 labels={"hours": "Hours", "bucket_label": "", color_col or "": ""})
-    if color_col:
-        fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>%{y}<br>%{x:.1f} h<extra></extra>")
-    else:
-        fig.update_traces(hovertemplate="%{y}<br>%{x:.1f} h<extra></extra>")
-    # ~28px per bucket so every day/week label has room; floor keeps small ranges sane.
-    # Force a category axis: Plotly otherwise auto-types the ISO date strings as a
-    # date axis and thins the ticks (and dtick on a date axis is in milliseconds).
-    fig.update_layout(height=max(400, len(bucket_order) * 28),
-                      yaxis=dict(type="category"))
-    st.plotly_chart(fig, use_container_width=True)
+    # Chart 1: time buckets are the primary axis, split categories stacked.
+    st.subheader("Hours over time")
+    fig = stacked_bar(chart_data, "bucket_label", bucket_order, color_col, None, horizontal)
+    st.plotly_chart(fig, width="stretch")
 
-    # --- Pivoted view: split dimension on the x-axis, time buckets stacked ---
+    # Chart 2: split categories are the primary axis, time buckets stacked.
     if color_col:
         st.subheader("Hours by category, pivoted over time")
         pivoted = chart_data.copy()
-        # Order the time buckets chronologically so the stacked segments and legend
-        # read oldest-to-newest, then label them as plain date strings.
-        bucket_order = [b.strftime("%Y-%m-%d") for b in sorted(pivoted["bucket"].unique())]
-        pivoted["bucket_label"] = pivoted["bucket"].dt.strftime("%Y-%m-%d")
         # Sort categories by total hours so the biggest contributors sit together.
-        cat_order = (pivoted.groupby(color_col)["hours"].sum()
-                     .sort_values(ascending=False).index.tolist())
-        fig2 = px.bar(
-            pivoted, x="hours", y=color_col, color="bucket_label", orientation="h",
-            color_discrete_sequence=PAIRED,
-            category_orders={color_col: cat_order, "bucket_label": bucket_order},
-            labels={"hours": "Hours", color_col: "", "bucket_label": ""},
-        )
-        fig2.update_traces(hovertemplate="<b>%{y}</b><br>%{fullData.name}<br>%{x:.1f} h<extra></extra>")
-        # ~28px per category so every ticket/kind label stays visible.
-        fig2.update_layout(height=max(400, len(cat_order) * 28))
-        st.plotly_chart(fig2, use_container_width=True)
+        cat_totals = pivoted.groupby(color_col)["hours"].sum().sort_values(ascending=False)
+        # Cap the number of category bars; roll the long tail into one bucket so the
+        # chart stays readable without silently dropping hours from the totals.
+        MAX_CATS = 40
+        if len(cat_totals) > MAX_CATS:
+            keep = set(cat_totals.index[:MAX_CATS])
+            n_rolled = len(cat_totals) - MAX_CATS
+            roll_label = f"(+{n_rolled} smaller)"
+            pivoted[color_col] = pivoted[color_col].where(pivoted[color_col].isin(keep), roll_label)
+            # Collapsing several categories into roll_label can create duplicate rows
+            # within a bucket, so re-aggregate before plotting.
+            pivoted = pivoted.groupby(["bucket", "bucket_label", color_col], as_index=False)["hours"].sum()
+            cat_order = cat_totals.index[:MAX_CATS].tolist() + [roll_label]
+            st.caption(f"Showing top {MAX_CATS} categories; {n_rolled} smaller rolled into {roll_label}.")
+        else:
+            cat_order = cat_totals.index.tolist()
+        fig2 = stacked_bar(pivoted, color_col, cat_order, "bucket_label", bucket_order, horizontal)
+        st.plotly_chart(fig2, width="stretch")
 
-    # --- Persist split_dims ---
-    if sorted(qp.get_all("split_dims")) != sorted(split_dims):
-        st.query_params["split_dims"] = split_dims
+    # --- Persist split_dims and orientation ---
+    persist_query_params({"t_split_dims": split_dims, "t_orient": orient})
+    if qp.get("orient") != orient:
+        st.query_params["orient"] = orient
 
 
 if __name__ == "__main__":

@@ -34,7 +34,9 @@ def test_resolve_ticket_meeting_without_meeting_ticket_gets_placeholder() -> Non
 def test_resolve_ticket_untracked_work_is_classified_by_comment() -> None:
     m = _load_module()
     assert m.resolve_ticket("work", None, "ENG-6880", "comms (Slack)") == "(comms)"
-    assert m.resolve_ticket("work", None, "ENG-6880", "notes & time tracking") == "(workspace/notes)"
+    # "notes" is the daily-notes habit and precedes tooling, so a mixed comment counts
+    # as notes rather than time-tracker building.
+    assert m.resolve_ticket("work", None, "ENG-6880", "notes & time tracking") == "(notes)"
     assert m.resolve_ticket("work", None, "ENG-6880", "something else") == "(other)"
 
 
@@ -45,8 +47,10 @@ def test_resolve_ticket_personal() -> None:
 
 def test_classify_untracked_first_match_wins() -> None:
     m = _load_module()
-    # "time-tracker tooling" hits the workspace bucket, not the generic tooling one.
-    assert m.classify_untracked("time-tracker tooling") == "(workspace/notes)"
+    # Building the time-tracker is tool work: "time-track" now lands in (tooling).
+    assert m.classify_untracked("time-tracker tooling") == "(tooling)"
+    # A comment with no notes keyword but time-track still reads as tooling.
+    assert m.classify_untracked("optimize time-tracker scripts") == "(tooling)"
     assert m.classify_untracked("dev-machine memory/swap investigation") == "(ops)"
 
 
