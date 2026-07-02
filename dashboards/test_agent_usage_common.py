@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 
-from agent_usage_common import calc_cost_breakdown, write_events
+from agent_usage_common import build_project_resolver, calc_cost_breakdown, write_events
 
 
 def test_calc_cost_breakdown_returns_per_token_type_costs() -> None:
@@ -58,3 +58,25 @@ def test_write_events_persists_cost_breakdown_fields(tmp_path) -> None:
     assert row["cache_write_cost"] == 0.06
     assert row["cache_read_cost"] == 0.08
     assert row["cost"] == 0.34
+
+
+def test_build_project_resolver_normalizes_worktree_cwds(tmp_path, monkeypatch) -> None:
+    # No real Paseo registry, so the mapper is a no-op and our pre-written map stands.
+    monkeypatch.setenv("PASEO_HOME", str(tmp_path / "absent"))
+    root = tmp_path / "myrepo"
+    (root / ".git").mkdir(parents=True)
+    paseo_wt = "/home/u/.paseo/worktrees/abc123/feature"
+    (tmp_path / "paseo-worktrees.jsonl").write_text(
+        json.dumps({"cwd": paseo_wt, "projectRoot": str(root)}) + "\n"
+    )
+
+    resolve = build_project_resolver(tmp_path)
+
+    # A registered worktree cwd maps to its owning project root.
+    assert resolve(paseo_wt) == str(root)
+    # A project-internal worktree dir is stripped back to the repo root.
+    assert resolve(f"{root}/.worktrees/xyz/feature") == str(root)
+    # /tmp paths collapse to a single bucket.
+    assert resolve("/tmp/scratch/session") == "/tmp"
+    # A plain path outside any repo is returned unchanged.
+    assert resolve("/no/such/place") == "/no/such/place"

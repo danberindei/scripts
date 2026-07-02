@@ -19,6 +19,7 @@ from pathlib import Path
 
 from agent_usage_common import (
     DEFAULT_OUTPUT_DIR,
+    build_project_resolver,
     load_pricing_db,
     parse_dt,
     write_events,
@@ -131,6 +132,9 @@ def main():
     end = parse_dt(args.end, end_of_day=True) if args.end else parse_dt(today, end_of_day=True)
 
     pricing_db = load_pricing_db()
+    # Resolve each session's raw cwd to its real project (worktrees -> owning repo)
+    # here, at write time, so the dashboard reads final project paths verbatim.
+    resolve_project = build_project_resolver(output_dir)
 
     any_events = False
     for config_dir in config_dirs:
@@ -138,6 +142,8 @@ def main():
         prefix = config_dir.name.lstrip(".")
 
         events = load_events(config_dir, args.project, start, end)
+        for e in events:
+            e["project"] = resolve_project(e["project"])
         if write_events(events, output_dir, prefix, pricing_db):
             any_events = True
 

@@ -25,6 +25,7 @@ from pathlib import Path
 
 from agent_usage_common import (
     DEFAULT_OUTPUT_DIR,
+    build_project_resolver,
     load_pricing_db,
     parse_dt,
     write_events,
@@ -170,8 +171,13 @@ def main():
     end = parse_dt(args.end, end_of_day=True) if args.end else parse_dt(today, end_of_day=True)
 
     pricing_db = load_pricing_db()
+    # Resolve each session's raw cwd to its real project (worktrees -> owning repo)
+    # here, at write time, so the dashboard reads final project paths verbatim.
+    resolve_project = build_project_resolver(output_dir)
 
     events = load_events(codex_dirs, args.project, start, end)
+    for e in events:
+        e["project"] = resolve_project(e["project"])
     if not write_events(events, output_dir, "codex", pricing_db):
         print("No events found.", file=sys.stderr)
         sys.exit(1)
