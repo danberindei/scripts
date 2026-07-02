@@ -6,9 +6,14 @@
 #   red when remainingPercent < expectedRemainingPercent * 0.5
 #
 # Caches the API response for 60s to avoid hammering the endpoint.
-# User bypass: type "ignore quota", "continue in X min", or "snooze for Xh" to disable the check for that session.
+# User bypass:
+#   "ignore quota"          -> persistent: disables the check for the rest of the session.
+#   "continue in X min" or "snooze for Xh" -> temporary: disables the check for the current turn only
+#                              (cleared on the next prompt). The duration X is not enforced here; it is a
+#                              signal for the LLM to schedule its own wakeup/task after that interval.
 
-bypass_pattern="ignore quota|continue in [0-9]+|snooze for [0-9.]+"
+persistent_pattern="ignore quota"
+temporary_pattern="continue in [0-9]+|snooze for [0-9.]+"
 
 config_dir="${1:-${CLAUDE_CONFIG_DIR:-${HOME}/.claude}}"
 
@@ -26,16 +31,26 @@ session_id=$(echo "$input" | jq -r '.session_id // empty')
 prompt=$(echo "$input" | jq -r '.prompt // empty')
 
 if [[ -n "$session_id" ]]; then
-  flag_file="/tmp/claude-bypass-quota-${session_id}"
+  flag_file_p="/tmp/claude-bypass-quota-p-${session_id}"
+  flag_file_t="/tmp/claude-bypass-quota-t-${session_id}"
 
-  # UserPromptSubmit: arm the bypass flag if the user typed the keyword.
-  if [[ -n "$prompt" ]] && echo "$prompt" | grep -Ei "$bypass_pattern"; then
-    touch "$flag_file"
-    exit 0
+  # UserPromptSubmit: handle persistent and temporary bypass flags.
+  if [[ -n "$prompt" ]]; then
+    rm -f "$flag_file_t"
+    matched=0
+    if echo "$prompt" | grep -qEi "$persistent_pattern"; then
+      touch "$flag_file_p"
+      matched=1
+    fi
+    if echo "$prompt" | grep -qEi "$temporary_pattern"; then
+      touch "$flag_file_t"
+      matched=1
+    fi
+    [[ $matched -eq 1 ]] && exit 0
   fi
 
-  # PreToolUse: skip quota check if bypass is armed.
-  if [[ -f "$flag_file" ]]; then
+  # PreToolUse: skip quota check if any bypass is armed.
+  if [[ -f "$flag_file_p" || -f "$flag_file_t" ]]; then
     exit 0
   fi
 fi
