@@ -160,8 +160,15 @@ def main() -> None:
     end_date = dc2.date_input("End date", value=_qp_date("end", max_date),
                               min_value=min_date, max_value=max_date)
 
-    grain = st.sidebar.radio("Bucket", ["day", "week"],
-                             index=["day", "week"].index(qp.get("grain", "day")), horizontal=True)
+    # Same widget/label/vocabulary as agents-dashboard.py's grain control, so the two
+    # pages feel consistent and can share the "grain" query param. Time entries are
+    # day-grained, so only the 1w/1d subset is meaningful here. Read defensively: a
+    # finer grain the other page set (e.g. 1h) isn't a valid option, so fall back to 1d.
+    grain_opts = ["1w", "1d"]
+    grain_default = qp.get("grain", "1d")
+    if grain_default not in grain_opts:
+        grain_default = "1d"
+    grain = st.sidebar.select_slider("Time granularity", options=grain_opts, value=grain_default)
 
     selected_kinds = st.sidebar.multiselect("Kind", all_kinds, default=_qp_list("kind", all_kinds) or all_kinds)
     selected_tickets = st.sidebar.multiselect("Ticket (leave empty for all)", all_tickets,
@@ -193,7 +200,7 @@ def main() -> None:
         st.stop()
 
     # Bucket timestamp: start-of-week for the weekly grain, else the day itself.
-    if grain == "week":
+    if grain == "1w":
         display["bucket"] = display["date"].dt.to_period("W").dt.start_time
     else:
         display["bucket"] = display["date"]
