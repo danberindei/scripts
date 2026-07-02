@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Claude Code UserPromptSubmit + PreToolUse hook: block tool calls when quota pace is red.
 # Register for BOTH events: UserPromptSubmit arms the bypass flag, PreToolUse checks quota.
-# Uses the same algorithm as Paseo's getRateLimitWindowTone:
+# Pacing target ends at 2% remaining at the window reset (not 0%), so the
+# expected-remaining line runs from 100% down to 2% over the window.
 #   red when remainingPercent < expectedRemainingPercent * 0.5
 #
 # Caches the API response for 60s to avoid hammering the endpoint.
@@ -84,7 +85,7 @@ check=$(echo "$body" | jq -r --argjson now "$now_ms" '
             ($elapsed_ms / dur_ms) as $elapsed_frac |
             if $elapsed_frac <= 0 then empty
             else
-              ((1 - $elapsed_frac) * 100) as $expected_remaining |
+              (2 + (1 - $elapsed_frac) * 98) as $expected_remaining |
               ($expected_remaining * 0.5) as $red_threshold |
               if $remaining < $red_threshold then
                 "\(key): \($remaining | round)% left, expected \($expected_remaining | round)%"
