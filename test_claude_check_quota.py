@@ -104,5 +104,22 @@ class RedWindowsTest(unittest.TestCase):
         self.assertIn("five_hour", msgs[0])
 
 
+class TemporaryPatternTest(unittest.TestCase):
+    def test_matches_session_handoff(self):
+        self.assertIsNotNone(q.TEMPORARY_PATTERN.search("please do a session handoff"))
+
+    def test_matches_hand_off(self):
+        self.assertIsNotNone(q.TEMPORARY_PATTERN.search("hand off to another agent"))
+
+    def test_matches_wrap_up(self):
+        self.assertIsNotNone(q.TEMPORARY_PATTERN.search("let's wrap up"))
+
+    def test_matches_snooze(self):
+        self.assertIsNotNone(q.TEMPORARY_PATTERN.search("snooze for 1.5h"))
+
+    def test_no_match_unrelated(self):
+        self.assertIsNone(q.TEMPORARY_PATTERN.search("what's the weather today"))
+
+
 if __name__ == "__main__":
     unittest.main()

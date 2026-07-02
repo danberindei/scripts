@@ -14,6 +14,8 @@ User bypass:
                                           (cleared on the next prompt). The duration X is not enforced
                                           here; it is a signal for the LLM to schedule its own
                                           wakeup/task after that interval.
+  "session handoff" / "hand off" / etc.   temporary: disables the check for the current turn only,
+                                          so a handoff request isn't blocked by a red quota pace.
 
 Exit codes: 0 = allow, 2 = block (message on stderr).
 """
@@ -32,7 +34,10 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 BETA_HEADER = "oauth-2025-04-20"
 
 PERSISTENT_PATTERN = re.compile(r"ignore quota", re.IGNORECASE)
-TEMPORARY_PATTERN = re.compile(r"continue in [0-9]+|snooze for [0-9.]+", re.IGNORECASE)
+TEMPORARY_PATTERN = re.compile(
+    r"continue in [0-9]+|snooze for [0-9.]+|session handoff|hand off|hand this to|wrap up",
+    re.IGNORECASE,
+)
 
 # label -> window duration in milliseconds
 WINDOWS = [
