@@ -38,6 +38,8 @@ TEMPORARY_PATTERN = re.compile(
     r"continue in [0-9]+|snooze for [0-9.]+|session handoff|hand off|hand this to|wrap up",
     re.IGNORECASE,
 )
+# System-injected prompts (subagent completion); the child already spent its tokens.
+INJECTED_PROMPT_PATTERN = re.compile(r"<task-notification", re.IGNORECASE)
 
 # label -> window duration in milliseconds
 WINDOWS = [
@@ -204,6 +206,10 @@ def main():
         data = {}
     session_id = data.get("session_id") or ""
     prompt = data.get("prompt") or ""
+
+    # Never block an injected prompt; checked first so it does not disturb bypass flags.
+    if prompt and INJECTED_PROMPT_PATTERN.search(prompt):
+        return 0
 
     if session_id and handle_bypass(session_id, prompt):
         return 0

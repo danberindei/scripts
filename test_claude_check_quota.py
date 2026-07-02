@@ -121,5 +121,22 @@ class TemporaryPatternTest(unittest.TestCase):
         self.assertIsNone(q.TEMPORARY_PATTERN.search("what's the weather today"))
 
 
+class InjectedPromptPatternTest(unittest.TestCase):
+    def test_matches_task_notification(self):
+        self.assertIsNotNone(
+            q.INJECTED_PROMPT_PATTERN.search(
+                "<task-notification>Agent foo completed</task-notification>"
+            )
+        )
+
+    def test_matches_task_notification_with_attrs(self):
+        self.assertIsNotNone(
+            q.INJECTED_PROMPT_PATTERN.search('<task-notification id="123">done</task-notification>')
+        )
+
+    def test_no_match_ordinary_prompt(self):
+        self.assertIsNone(q.INJECTED_PROMPT_PATTERN.search("please fix the bug in the parser"))
+
+
 if __name__ == "__main__":
     unittest.main()
