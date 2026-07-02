@@ -48,4 +48,4 @@ def test_deselected_providers_are_persisted_as_provider_off(tmp_path: Path, monk
     app.sidebar.multiselect[0].set_value(["claude"])
     app.run()
 
-    assert app.query_params["provider_off"] == ["codex"]
+    assert app.query_params["a_provider_off"] == ["codex"]

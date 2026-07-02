@@ -18,6 +18,7 @@ import streamlit as st
 from plotly.colors import sample_colorscale
 
 from agent_usage_common import WORKTREE_MAP_FILE
+from dashboard_ui import persist_query_params, seed_widget_state
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "agent-usage"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -163,9 +164,17 @@ def _qp_list(key, valid):
 today = datetime.now().astimezone().date()
 date_max = max(max_ts.date(), today)
 
+# Every control is bound to session_state via key= and seeded once from the query
+# params, rather than fed value=/default=/index= each rerun. A recomputed arg fights the
+# query-param write-back below (the widget snaps back mid-change), the choppiness the
+# grain slider showed. Keys/params are a_-prefixed and page-specific: this app is one
+# st.navigation instance whose session_state and query params are shared across pages,
+# so unprefixed names would collide with the time page.
 dc1, dc2 = st.sidebar.columns(2)
-start_date = dc1.date_input("Start date", value=_qp_date("start", today - timedelta(days=7)), min_value=min_ts.date(), max_value=date_max)
-end_date = dc2.date_input("End date", value=_qp_date("end", max_ts.date()), min_value=min_ts.date(), max_value=date_max)
+seed_widget_state("a_start", _qp_date("a_start", today - timedelta(days=7)))
+seed_widget_state("a_end", _qp_date("a_end", max_ts.date()))
+start_date = dc1.date_input("Start date", min_value=min_ts.date(), max_value=date_max, key="a_start")
+end_date = dc2.date_input("End date", min_value=min_ts.date(), max_value=date_max, key="a_end")
 
 if st.sidebar.button("Refresh data"):
     with st.spinner("Running extractors..."):
@@ -178,52 +187,51 @@ if refresh_results:
     for name, ok, msg in refresh_results:
         (st.sidebar.success if ok else st.sidebar.warning)(f"{name}: {msg or ('ok' if ok else 'failed')}")
 
-providers_off = set(qp.get_all("provider_off"))
-selected_providers = st.sidebar.multiselect("Provider", providers, default=[s for s in providers if s not in providers_off])
-selected_projects = st.sidebar.multiselect("Project (leave empty for all)", all_projects, default=_qp_list("project", all_projects) or [])
+# The query param stores the OFF providers, so the widget's session_state (the ON set)
+# is seeded as the complement.
+seed_widget_state("a_provider", [s for s in providers if s not in set(qp.get_all("a_provider_off"))])
+selected_providers = st.sidebar.multiselect("Provider", providers, key="a_provider")
+seed_widget_state("a_project", _qp_list("a_project", all_projects) or [])
+selected_projects = st.sidebar.multiselect("Project (leave empty for all)", all_projects, key="a_project")
 
 _range_key = (str(start_date), str(end_date))
-if "time_grain" not in st.session_state:
-    _g = qp.get("grain", "1d")
-    st.session_state["time_grain"] = _g if _g in grains else "1d"
-    st.session_state["_grain_range_key"] = _range_key
+if "a_grain" not in st.session_state:
+    _g = qp.get("a_grain", "1d")
+    st.session_state["a_grain"] = _g if _g in grains else "1d"
+    st.session_state["a_grain_range_key"] = _range_key
 
 # Auto-pick a readable grain only when the date range changes; manual grain
 # changes are always respected. Uses the theoretical bucket count over the span
 # (an upper bound on the actual data points), which keeps this deterministic and
-# independent of filtering.
+# independent of filtering. This programmatic override sets session_state before the
+# widget renders, which is compatible with the key= binding.
 _span_min = ((end_date - start_date).days + 1) * MINUTES_PER_DAY
 _grain_points = lambda g: _span_min / GRAIN_MINUTES[g]
-if st.session_state.get("_grain_range_key") != _range_key:
-    st.session_state["_grain_range_key"] = _range_key
-    current_grain = st.session_state["time_grain"]
+if st.session_state.get("a_grain_range_key") != _range_key:
+    st.session_state["a_grain_range_key"] = _range_key
+    current_grain = st.session_state["a_grain"]
     idx = grains.index(current_grain)
     # _grain_points is monotonic in the grain index, so the fitting grains form a
     # contiguous range: keep the current grain if it fits, else clamp toward the band.
     band = [i for i, g in enumerate(grains) if 2 <= _grain_points(g) <= MAX_BUCKETS]
     if band:
         # Clamp is a no-op when idx is already in band.
-        st.session_state["time_grain"] = grains[min(max(idx, band[0]), band[-1])]
+        st.session_state["a_grain"] = grains[min(max(idx, band[0]), band[-1])]
     else:
-        st.session_state["time_grain"] = "1m" if _grain_points("1m") < 2 else "1w"
-time_grain = st.sidebar.select_slider("Time granularity", options=grains, key="time_grain")
+        st.session_state["a_grain"] = "1m" if _grain_points("1m") < 2 else "1w"
+time_grain = st.sidebar.select_slider("Time granularity", options=grains, key="a_grain")
 
 
 # --- Persist sidebar filter state to query params ---
 # Done here (before any st.stop()) so the URL updates even when no data matches.
 # split_dims is synced at the bottom since it's defined in the main content area.
-_sidebar_desired = {
-    "start": str(start_date),
-    "end": str(end_date),
-    "grain": time_grain,
-    "provider_off": [s for s in providers if s not in selected_providers],
-    "project": selected_projects,
-}
-for _k, _v in _sidebar_desired.items():
-    _current = sorted(qp.get_all(_k))
-    _target = sorted(_v if isinstance(_v, list) else [_v])
-    if _current != _target:
-        st.query_params[_k] = _v
+persist_query_params({
+    "a_start": str(start_date),
+    "a_end": str(end_date),
+    "a_grain": time_grain,
+    "a_provider_off": [s for s in providers if s not in selected_providers],
+    "a_project": selected_projects,
+})
 
 # --- Filter ---
 start_ts = datetime.combine(start_date, time(0, 0))
@@ -289,7 +297,7 @@ with col_left:
         height=280,
         margin=dict(t=30, b=0, l=0, r=0),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 with col_mid:
     by_provider = display.groupby("provider")["cost"].sum().reset_index()
@@ -308,7 +316,7 @@ with col_mid:
         height=280,
         margin=dict(t=30, b=0, l=0, r=0),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 with col_right:
     by_model = display.groupby("model")["cost"].sum().reset_index()
@@ -327,7 +335,7 @@ with col_right:
         height=280,
         margin=dict(t=30, b=0, l=0, r=0),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 st.divider()
 
@@ -348,13 +356,12 @@ TOKEN_TYPE_LABELS = {
 }
 
 
-split_dims_default = [d for d in qp.get_all("split_dims") if d in DIM_OPTIONS] or ["provider", "project"]
+seed_widget_state("a_split_dims", [d for d in qp.get_all("a_split_dims") if d in DIM_OPTIONS] or ["provider", "project"])
 split_dims = st.multiselect(
     "Split by",
     DIM_OPTIONS,
-    default=split_dims_default,
     max_selections=3,
-    key="split_dims",
+    key="a_split_dims",
 )
 
 chart_data = display.copy()
@@ -422,9 +429,7 @@ if color_col:
     fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>%{x}<br>$%{y:.4f}<extra></extra>")
 else:
     fig.update_traces(hovertemplate="%{x}<br>$%{y:.4f}<extra></extra>")
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # --- Persist split_dims to query params ---
-_desired_split_dims = sorted(split_dims)
-if sorted(qp.get_all("split_dims")) != _desired_split_dims:
-    st.query_params["split_dims"] = split_dims
+persist_query_params({"a_split_dims": split_dims})

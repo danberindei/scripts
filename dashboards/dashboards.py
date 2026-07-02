@@ -9,8 +9,9 @@ Usage:
   streamlit run dashboards.py
 
 Each page keeps its own st.set_page_config() call; the active page's config wins
-for that run. The two pages share the URL's query params, so overlapping keys
-(start, end, grain, split_dims) are read defensively on each page.
+for that run. session_state and query params are shared across pages in one
+st.navigation app, so each page namespaces its widget keys and params by page
+(a_ for agent usage, t_ for time tracking) to avoid cross-page collisions.
 """
 
 import os
