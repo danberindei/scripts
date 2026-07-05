@@ -28,4 +28,5 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 st.navigation([
     st.Page("agents-dashboard.py", title="Agent Usage", default=True),
     st.Page("time-dashboard.py", title="Time Tracking"),
+    st.Page("weeks-dashboard.py", title="Weekly Calendar"),
 ]).run()
