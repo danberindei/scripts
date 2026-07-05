@@ -12,6 +12,7 @@ Usage:
 
 import html
 import json
+import math
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -91,6 +92,7 @@ def _build_week_html(
     colors: dict,
     subjects: dict,
     max_bar_height_px: float,
+    display_mode: str = "proportional",
 ) -> tuple:
     """Build HTML string and required iframe height for one week section.
 
@@ -109,14 +111,8 @@ def _build_week_html(
 
     active_dates = week_dates_list[:5] if hide_weekend else week_dates_list
 
-    # Compute the actual content height needed (bar height + outside label overflow).
+    # Compute the actual content height needed.
     max_content_h = max_bar_height_px
-    for d in active_dates:
-        for block in layout.get(d, []):
-            if block["label_outside"]:
-                bottom = block["label_top_px"] + LABEL_LINE_HEIGHT_PX
-                if bottom > max_content_h:
-                    max_content_h = bottom
 
     iframe_height = int(max_content_h) + 80  # 40px header + 40px padding
 
@@ -131,8 +127,6 @@ def _build_week_html(
         total_str = _fmt_hhmm(day_total_min) if day_total_min else "-"
 
         bar_html_parts = []
-        svg_lines = []
-        gutter_html_parts = []
 
         for block in blocks:
             slug = block["slug"]
@@ -165,43 +159,28 @@ def _build_week_html(
             extra_class = f" {kind}" if kind in ("meeting", "personal") else ""
             personal_style = " filter:saturate(0.2) brightness(0.95);" if kind == "personal" else ""
 
-            if block["label_outside"]:
-                inner = ""
-            else:
-                inner = (
-                    f'<span class="inner-label">'
-                    f'{html.escape(label)} &middot; {mins_str}'
-                    f'</span>'
-                )
+            inner = (
+                f'<span class="inner-label">'
+                f'{html.escape(label)} &middot; {mins_str}'
+                f'</span>'
+            )
+
+            # Determine width for the color fill: proportional to hour in fixed-line mode.
+            fill_width = "100%"
+            if display_mode == "fixed-line" and block["minutes"] < 60:
+                fill_width = f"{(block['minutes'] / 60.0 * 100):.1f}%"
+
+            fill_extra_class = " meeting-fill" if kind == "meeting" else ""
 
             bar_html_parts.append(
                 f'<div class="block{extra_class}" '
-                f'style="top:{top:.1f}px;height:{h_px:.1f}px;background:{color};{personal_style}" '
+                f'style="top:{top:.1f}px;height:{h_px:.1f}px;width:100%;background:transparent;" '
                 f'data-tip="{tip_attr}">'
+                f'<div class="block-fill{fill_extra_class}" style="width:{fill_width};height:100%;background:{color};{personal_style}"></div>'
                 f'{inner}</div>'
             )
 
-            if block["label_outside"]:
-                label_top = block["label_top_px"]
-                block_center = top + h_px / 2
-                label_center = label_top + LABEL_LINE_HEIGHT_PX / 2
-                # SVG line: x coords in % of full cell width (bar=60%, gutter starts at 61%)
-                svg_lines.append(
-                    f'<line x1="60%" y1="{block_center:.1f}" '
-                    f'x2="62%" y2="{label_center:.1f}" '
-                    f'stroke="#bbb" stroke-width="0.8"/>'
-                )
-                gutter_html_parts.append(
-                    f'<span class="outer-label" style="top:{label_top:.1f}px">'
-                    f'{html.escape(label)} &middot; {mins_str}'
-                    f'</span>'
-                )
-
-        svg_html = (
-            f'<svg class="leader-svg" style="height:{max_bar_height_px:.0f}px">'
-            + "".join(svg_lines)
-            + "</svg>"
-        ) if svg_lines else ""
+        svg_html = ""
 
         day_cols_html.append(f"""
 <div class="day-col">
@@ -212,7 +191,7 @@ def _build_week_html(
   <div class="day-body" style="height:{max_bar_height_px:.0f}px">
     <div class="bar-area">{''.join(bar_html_parts)}</div>
     {svg_html}
-    <div class="gutter-area">{''.join(gutter_html_parts)}</div>
+    <div class="gutter-area"></div>
   </div>
 </div>""")
 
@@ -223,19 +202,20 @@ def _build_week_html(
 <style>
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; color: #333; background: transparent; }}
-.week-days {{ display: flex; gap: 4px; align-items: flex-start; }}
+.week-days {{ display: flex; gap: 1px; align-items: flex-start; }}
 .day-col {{ flex: 1; min-width: 0; }}
 .day-header {{ text-align: center; padding: 4px 2px 8px; line-height: 1.3; }}
 .day-date {{ font-weight: 600; font-size: 11px; }}
 .day-total {{ color: #777; font-size: 10px; }}
 .day-body {{ position: relative; }}
-.bar-area {{ position: absolute; left: 0; width: 60%; top: 0; bottom: 0; }}
-.block {{ position: absolute; width: 100%; overflow: hidden; cursor: default; border-bottom: 1px solid rgba(255,255,255,0.2); }}
-.block.meeting::after {{ content: ''; position: absolute; inset: 0; background: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0,0,0,0.1) 4px, rgba(0,0,0,0.1) 8px); pointer-events: none; }}
-.inner-label {{ position: absolute; left: 3px; right: 3px; top: 50%; transform: translateY(-50%); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; color: rgba(0,0,0,0.75); }}
+.bar-area {{ position: absolute; left: 0; width: 100%; top: 0; bottom: 0; }}
+.block {{ position: absolute; overflow: visible; cursor: default; border-bottom: 1px solid rgba(255,255,255,0.2); }}
+.block-fill {{ position: absolute; left: 0; top: 0; pointer-events: none; }}
+.block-fill.meeting-fill::after {{ content: ''; position: absolute; inset: 0; background: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0,0,0,0.1) 4px, rgba(0,0,0,0.1) 8px); pointer-events: none; }}
+.inner-label {{ position: absolute; left: 3px; right: 3px; top: 50%; transform: translateY(-50%); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; color: #333; }}
 .leader-svg {{ position: absolute; left: 0; top: 0; width: 100%; overflow: visible; pointer-events: none; z-index: 2; }}
-.gutter-area {{ position: absolute; left: 61%; width: 39%; top: 0; bottom: 0; }}
-.outer-label {{ position: absolute; left: 6px; right: 2px; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: {LABEL_LINE_HEIGHT_PX}px; color: #555; pointer-events: none; }}
+.gutter-area {{ display: none; }}
+.outer-label {{ display: none; }}
 #wk-tooltip {{ position: fixed; background: #1e1e2e; color: #cdd6f4; padding: 8px 10px; border-radius: 5px; font-size: 11px; max-width: 340px; pointer-events: none; z-index: 9999; display: none; line-height: 1.5; box-shadow: 0 2px 10px rgba(0,0,0,0.35); word-break: break-word; }}
 #wk-tooltip b {{ color: #89b4fa; }}
 #wk-tooltip .entry-line {{ color: #a6adc8; font-size: 10px; }}
@@ -398,16 +378,28 @@ def main():
         key="w_weeks",
     )
 
+    seed_widget_state("w_ticket", st.query_params.get("w_ticket", "1") == "1")
+    include_ticket = st.sidebar.checkbox("Ticket", key="w_ticket")
+
+    seed_widget_state("w_ticketless", st.query_params.get("w_ticketless", "1") == "1")
+    include_ticketless = st.sidebar.checkbox("Ticketless", key="w_ticketless")
+
     seed_widget_state("w_personal", st.query_params.get("w_personal", "0") == "1")
-    include_personal = st.sidebar.checkbox("Include personal", key="w_personal")
+    include_personal = st.sidebar.checkbox("Personal", key="w_personal")
 
     seed_widget_state("w_min_size", int(st.query_params.get("w_min_size", "0")))
     min_size = st.sidebar.slider("Min block size (min)", 0, 60, 0, key="w_min_size")
 
+    seed_widget_state("w_mode", st.query_params.get("w_mode", "proportional"))
+    display_mode = st.sidebar.radio("Display Mode", ["proportional", "fixed-line"], key="w_mode")
+
     persist_query_params({
         "w_weeks": selected_week_keys,
+        "w_ticket": "1" if include_ticket else "0",
+        "w_ticketless": "1" if include_ticketless else "0",
         "w_personal": "1" if include_personal else "0",
         "w_min_size": str(min_size),
+        "w_mode": display_mode,
     })
 
     if not selected_week_keys:
@@ -419,7 +411,7 @@ def main():
     for wk_key in selected_week_keys:
         iso = week_key_to_iso[wk_key]
         days_this_week = week_day_map.get(iso, [])
-        wk_data = group_week(days_this_week, include_personal)
+        wk_data = group_week(days_this_week, include_ticket, include_ticketless, include_personal)
         
         # Filter by minimum size for scale calculation
         if min_size > 0:
@@ -439,8 +431,26 @@ def main():
         st.warning("No data in the selected weeks.")
         st.stop()
 
-    px_per_min = min(1.0, MAX_DAY_HEIGHT_PX / max_day_minutes)
-    max_bar_height_px = max_day_minutes * px_per_min
+    if display_mode == "fixed-line":
+        px_per_min = LABEL_LINE_HEIGHT_PX / 60.0
+        
+        # Find the day that has the most total rounded-up height
+        max_rounded_height = 0
+        for wk_key in selected_week_keys:
+            iso = week_key_to_iso[wk_key]
+            days_this_week = week_day_map.get(iso, [])
+            wk_data = group_week(days_this_week, include_ticket, include_ticketless, include_personal)
+            if min_size > 0:
+                wk_data = {d: {k: v for k, v in g.items() if v["minutes"] >= min_size} for d, g in wk_data.items()}
+            
+            for d_groups in wk_data.values():
+                day_rounded_h = sum(math.ceil(g["minutes"] / 60.0) * LABEL_LINE_HEIGHT_PX for g in d_groups.values())
+                if day_rounded_h > max_rounded_height:
+                    max_rounded_height = day_rounded_h
+        max_bar_height_px = max_rounded_height
+    else:
+        px_per_min = min(1.0, MAX_DAY_HEIGHT_PX / max_day_minutes)
+        max_bar_height_px = max_day_minutes * px_per_min
 
     # Legend popover.
     legend_rows = _legend_rows(all_days, selected_week_keys, colors, sprint_data["subjects"])
@@ -463,7 +473,7 @@ def main():
         st.subheader(week_labels[wk_key])
 
         days_this_week = week_day_map.get(iso, [])
-        wk_data = group_week(days_this_week, include_personal)
+        wk_data = group_week(days_this_week, include_ticket, include_ticketless, include_personal)
         
         if min_size > 0:
             wk_data = {
@@ -472,7 +482,7 @@ def main():
             }
             wk_data = {d: g for d, g in wk_data.items() if g}
             
-        wk_layout = layout_week(wk_data, px_per_min)
+        wk_layout = layout_week(wk_data, px_per_min, display_mode)
         wk_dates = _week_dates(isoyear, isoweek)
 
         week_html, iframe_height = _build_week_html(
@@ -481,6 +491,7 @@ def main():
             colors,
             sprint_data["subjects"],
             max_bar_height_px,
+            display_mode,
         )
         components.html(week_html, height=iframe_height, scrolling=False)
 

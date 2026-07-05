@@ -8,12 +8,11 @@ from pathlib import Path
 
 DEFAULT_DATA_DIR = Path(os.environ.get("TIME_DATA_DIR", Path.home() / "Performek" / "work" / "time"))
 
-# ColorBrewer "Paired" qualitative palette (12 colors). Duplicated here to keep
-# this module Streamlit-free so it can be imported in tests without a running server.
+# Pastel palette (12 colors) for high legibility with dark text.
 PAIRED = [
-    "#a6cee3", "#1f78b4", "#b2df8a", "#33a02c",
-    "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00",
-    "#cab2d6", "#6a3d9a", "#ffff99", "#b15928",
+    "#AEC6CF", "#B2DFB2", "#FFB7B2", "#FDFD96",
+    "#CDBBFF", "#FFD1DC", "#B3E5BE", "#A7C7E7",
+    "#FFF9C4", "#F8BBD0", "#E1BEE7", "#C8E6C9",
 ]
 
 LABEL_MAX_CHARS = 22
@@ -116,21 +115,44 @@ def week_of(d: date) -> tuple:
     return iso.year, iso.week
 
 
-def group_week(days: list, include_personal: bool) -> dict:
+def _entry_category(entry: dict) -> str:
+    """Return 'personal', 'ticket', or 'ticketless' for an entry."""
+    if entry.get("kind", "work") == "personal":
+        return "personal"
+    if entry.get("ticket"):
+        return "ticket"
+    return "ticketless"
+
+
+def group_week(
+    days: list,
+    include_ticket: bool = True,
+    include_ticketless: bool = True,
+    include_personal: bool = False,
+) -> dict:
     """Group entries by day and (slug, kind), summing minutes.
 
     Returns {date: {(slug, kind): {minutes, entries, display_label}}}.
-    Personal entries are excluded unless include_personal is True.
+    Each entry falls into one of three categories (ticket, ticketless, personal);
+    entries whose category flag is False are excluded.
     A ticket with both work and meeting entries in a day yields two separate groups.
     """
+    allowed = set()
+    if include_ticket:
+        allowed.add("ticket")
+    if include_ticketless:
+        allowed.add("ticketless")
+    if include_personal:
+        allowed.add("personal")
+
     result = {}
     for day in days:
         d = day["date"]
         day_groups = {}
         for entry in day.get("entries", []):
-            kind = entry.get("kind", "work")
-            if kind == "personal" and not include_personal:
+            if _entry_category(entry) not in allowed:
                 continue
+            kind = entry.get("kind", "work")
             slug, display_label = slug_of(entry)
             key = (slug, kind)
             if key not in day_groups:
@@ -183,16 +205,18 @@ def color_map(all_days: list) -> dict:
     return result
 
 
-def layout_week(week_data: dict, px_per_min: float) -> dict:
+def layout_week(week_data: dict, px_per_min: float, display_mode: str = "proportional") -> dict:
     """Compute pixel layout for each day in week_data.
 
     week_data: {date: {(slug, kind): {minutes, entries, display_label}}}
     px_per_min: shared scale factor applied uniformly across all displayed weeks.
+    display_mode: "proportional" or "fixed-line".
 
     Returns {date: [block_dict, ...]} where each block dict has:
         slug, kind, display_label, minutes, height_px, top_px,
         label_outside, label_top_px, entries
     """
+    import math
     result = {}
     for d, day_groups in week_data.items():
         sorted_groups = sorted(day_groups.items(), key=lambda x: -x[1]["minutes"])
@@ -200,7 +224,11 @@ def layout_week(week_data: dict, px_per_min: float) -> dict:
         blocks = []
         top = 0.0
         for (slug, kind), group in sorted_groups:
-            height = max(3.0, group["minutes"] * px_per_min)
+            if display_mode == "fixed-line":
+                height = math.ceil(group["minutes"] / 60.0) * LABEL_LINE_HEIGHT_PX
+            else:
+                height = max(3.0, group["minutes"] * px_per_min)
+            
             blocks.append({
                 "slug": slug,
                 "kind": kind,
