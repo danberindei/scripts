@@ -20,17 +20,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from dashboard_ui import persist_query_params, seed_widget_state
+from dashboard_ui import PAIRED, persist_query_params, qp_date, qp_list, seed_widget_state
 
 DEFAULT_DATA_DIR = Path(os.environ.get("TIME_DATA_DIR", Path.home() / "Performek" / "work" / "time"))
-
-# ColorBrewer "Paired" qualitative palette (matches agents-dashboard.py) for the
-# ticket/kind slices and stacked bars.
-PAIRED = [
-    "#a6cee3", "#1f78b4", "#b2df8a", "#33a02c",
-    "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00",
-    "#cab2d6", "#6a3d9a", "#ffff99", "#b15928",
-]
 
 # A real Jira ticket looks like ENG-1234; anything else is a "(...)" placeholder.
 TICKET_RE = re.compile(r"^[A-Z]+-\d+$")
@@ -179,19 +171,6 @@ def main() -> None:
     all_kinds = sorted(df["kind"].unique())
     all_tickets = sorted(df["ticket"].unique())
 
-    qp = st.query_params
-
-    def _qp_date(key, fallback):
-        try:
-            from datetime import date as _d
-            return _d.fromisoformat(qp[key])
-        except (KeyError, ValueError):
-            return fallback
-
-    def _qp_list(key, valid):
-        vals = [v for v in qp.get_all(key) if v in valid]
-        return vals or None
-
     # Every control is bound to session_state via key= and seeded once from the query
     # params, rather than fed value=/default= each rerun. A recomputed value= fights the
     # query-param write-back below (the widget snaps back mid-change), which is the
@@ -201,21 +180,21 @@ def main() -> None:
     # split-by options and finer grains aren't valid here).
     dc1, dc2 = st.sidebar.columns(2)
     default_start = max(min_date, max_date - timedelta(days=7))
-    seed_widget_state("t_start", _qp_date("t_start", default_start))
-    seed_widget_state("t_end", _qp_date("t_end", max_date))
+    seed_widget_state("t_start", qp_date("t_start", default_start))
+    seed_widget_state("t_end", qp_date("t_end", max_date))
     start_date = dc1.date_input("Start date", min_value=min_date, max_value=max_date, key="t_start")
     end_date = dc2.date_input("End date", min_value=min_date, max_value=max_date, key="t_end")
 
     # Time entries are day-grained, so only the 1w/1d subset is meaningful here.
     grain_opts = ["1w", "1d"]
-    _g = qp.get("t_grain", "1d")
+    _g = st.query_params.get("t_grain", "1d")
     seed_widget_state("t_grain", _g if _g in grain_opts else "1d")
     grain = st.sidebar.select_slider("Time granularity", options=grain_opts, key="t_grain")
 
     # Default to every kind except "personal" so the charts open on work-relevant time.
-    seed_widget_state("t_kind", _qp_list("t_kind", all_kinds) or [k for k in all_kinds if k != "personal"])
+    seed_widget_state("t_kind", qp_list("t_kind", all_kinds) or [k for k in all_kinds if k != "personal"])
     selected_kinds = st.sidebar.multiselect("Kind", all_kinds, key="t_kind")
-    seed_widget_state("t_ticket", _qp_list("t_ticket", all_tickets) or [])
+    seed_widget_state("t_ticket", qp_list("t_ticket", all_tickets) or [])
     selected_tickets = st.sidebar.multiselect("Ticket (leave empty for all)", all_tickets, key="t_ticket")
 
     # --- Filter ---
@@ -259,11 +238,11 @@ def main() -> None:
 
     # --- Hours split by chosen dimensions; both charts share one axis-orientation toggle ---
     ctrl1, ctrl2 = st.columns([3, 2])
-    seed_widget_state("t_split_dims", [d for d in qp.get_all("t_split_dims") if d in DIM_OPTIONS] or ["ticket"])
+    seed_widget_state("t_split_dims", [d for d in st.query_params.get_all("t_split_dims") if d in DIM_OPTIONS] or ["ticket"])
     split_dims = ctrl1.multiselect("Split by", DIM_OPTIONS, max_selections=len(DIM_OPTIONS), key="t_split_dims")
 
     orient_opts = ["Horizontal", "Vertical"]
-    _o = qp.get("t_orient", "Horizontal")
+    _o = st.query_params.get("t_orient", "Horizontal")
     seed_widget_state("t_orient", _o if _o in orient_opts else "Horizontal")
     orient = ctrl2.radio("Bar orientation", orient_opts, key="t_orient", horizontal=True)
     horizontal = orient == "Horizontal"
@@ -313,7 +292,7 @@ def main() -> None:
 
     # --- Persist split_dims and orientation ---
     persist_query_params({"t_split_dims": split_dims, "t_orient": orient})
-    if qp.get("orient") != orient:
+    if st.query_params.get("orient") != orient:
         st.query_params["orient"] = orient
 
 

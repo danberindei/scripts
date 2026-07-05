@@ -18,7 +18,7 @@ import streamlit as st
 from plotly.colors import sample_colorscale
 
 from agent_usage_common import WORKTREE_MAP_FILE
-from dashboard_ui import persist_query_params, seed_widget_state
+from dashboard_ui import PAIRED, persist_query_params, qp_date, qp_list, seed_widget_state
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "agent-usage"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -49,14 +49,6 @@ FIXED_PROVIDER_SCALES = {
 # extremes at the ends.
 _SCALE_LO = 0.35
 _SCALE_HI = 0.85
-
-# ColorBrewer "Paired" qualitative palette (12 colors, light/dark pairs). Plotly
-# doesn't ship this one, so define it explicitly. Used for the pie slices.
-PAIRED = [
-    "#a6cee3", "#1f78b4", "#b2df8a", "#33a02c",
-    "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00",
-    "#cab2d6", "#6a3d9a", "#ffff99", "#b15928",
-]
 
 
 def provider_scale_map(providers):
@@ -160,19 +152,6 @@ MAX_BUCKETS = MINUTES_PER_DAY
 grains = ["1w", "1d", "1h", "30m", "15m", "5m", "1m"]
 GRAIN_MINUTES = {"1w": 10080, "1d": MINUTES_PER_DAY, "1h": 60, "30m": 30, "15m": 15, "5m": 5, "1m": 1}
 
-qp = st.query_params
-
-def _qp_date(key, fallback):
-    try:
-        from datetime import date as _d
-        return _d.fromisoformat(qp[key])
-    except (KeyError, ValueError):
-        return fallback
-
-def _qp_list(key, valid):
-    vals = qp.get_all(key)
-    return [v for v in vals if v in valid] or None
-
 today = datetime.now().astimezone().date()
 date_max = max(max_ts.date(), today)
 
@@ -183,8 +162,8 @@ date_max = max(max_ts.date(), today)
 # st.navigation instance whose session_state and query params are shared across pages,
 # so unprefixed names would collide with the time page.
 dc1, dc2 = st.sidebar.columns(2)
-seed_widget_state("a_start", _qp_date("a_start", today - timedelta(days=7)))
-seed_widget_state("a_end", _qp_date("a_end", max_ts.date()))
+seed_widget_state("a_start", qp_date("a_start", today - timedelta(days=7)))
+seed_widget_state("a_end", qp_date("a_end", max_ts.date()))
 start_date = dc1.date_input("Start date", min_value=min_ts.date(), max_value=date_max, key="a_start")
 end_date = dc2.date_input("End date", min_value=min_ts.date(), max_value=date_max, key="a_end")
 
@@ -201,14 +180,14 @@ if refresh_results:
 
 # The query param stores the OFF providers, so the widget's session_state (the ON set)
 # is seeded as the complement.
-seed_widget_state("a_provider", [s for s in providers if s not in set(qp.get_all("a_provider_off"))])
+seed_widget_state("a_provider", [s for s in providers if s not in set(st.query_params.get_all("a_provider_off"))])
 selected_providers = st.sidebar.multiselect("Provider", providers, key="a_provider")
-seed_widget_state("a_project", _qp_list("a_project", all_projects) or [])
+seed_widget_state("a_project", qp_list("a_project", all_projects) or [])
 selected_projects = st.sidebar.multiselect("Project (leave empty for all)", all_projects, key="a_project")
 
 _range_key = (str(start_date), str(end_date))
 if "a_grain" not in st.session_state:
-    _g = qp.get("a_grain", "1d")
+    _g = st.query_params.get("a_grain", "1d")
     st.session_state["a_grain"] = _g if _g in grains else "1d"
     st.session_state["a_grain_range_key"] = _range_key
 
@@ -368,7 +347,7 @@ TOKEN_TYPE_LABELS = {
 }
 
 
-seed_widget_state("a_split_dims", [d for d in qp.get_all("a_split_dims") if d in DIM_OPTIONS] or ["provider", "project"])
+seed_widget_state("a_split_dims", [d for d in st.query_params.get_all("a_split_dims") if d in DIM_OPTIONS] or ["provider", "project"])
 split_dims = st.multiselect(
     "Split by",
     DIM_OPTIONS,

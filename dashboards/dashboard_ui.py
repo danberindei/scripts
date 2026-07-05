@@ -4,7 +4,31 @@ Kept separate from agent_usage_common.py so the headless extractors that import 
 module don't pull in Streamlit.
 """
 
+from datetime import date as _date
+
 import streamlit as st
+
+# ColorBrewer "Paired" qualitative palette (12 colors, light/dark pairs). Plotly
+# doesn't ship this one, so define it explicitly. Used for pie slices and stacked bars.
+PAIRED = [
+    "#a6cee3", "#1f78b4", "#b2df8a", "#33a02c",
+    "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00",
+    "#cab2d6", "#6a3d9a", "#ffff99", "#b15928",
+]
+
+
+def qp_date(key, fallback):
+    """Read a date query param by key, returning fallback on missing or invalid value."""
+    try:
+        return _date.fromisoformat(st.query_params[key])
+    except (KeyError, ValueError):
+        return fallback
+
+
+def qp_list(key, valid):
+    """Read a list query param, returning only values in valid, or None if empty."""
+    vals = st.query_params.get_all(key)
+    return [v for v in vals if v in valid] or None
 
 
 def seed_widget_state(key, seed):
