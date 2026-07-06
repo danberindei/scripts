@@ -38,6 +38,13 @@ PROVIDER_SCALES = [
     px.colors.sequential.YlGn,
     px.colors.sequential.Greys,
 ]
+FIXED_PROVIDER_SCALES = {
+    "claude": px.colors.sequential.Blues,
+    "claude-eng": px.colors.sequential.Greens,
+    "claude-home": px.colors.sequential.Greys,
+    "codex": px.colors.sequential.Oranges,
+    "codex-eng": px.colors.sequential.Purples,
+}
 # Sample within this sub-range of each scale to avoid the near-white and near-black
 # extremes at the ends.
 _SCALE_LO = 0.35
@@ -53,9 +60,14 @@ PAIRED = [
 
 
 def provider_scale_map(providers):
-    """Assign each provider (sorted) a stable sequential scale, shared across charts."""
-    ordered = sorted(providers)
-    return {p: PROVIDER_SCALES[i % len(PROVIDER_SCALES)] for i, p in enumerate(ordered)}
+    """Assign each provider a stable sequential scale, shared across charts."""
+    mapping = {p: FIXED_PROVIDER_SCALES[p] for p in providers if p in FIXED_PROVIDER_SCALES}
+    remaining = sorted(p for p in providers if p not in mapping)
+    used_scales = {tuple(scale) for scale in mapping.values()}
+    available_scales = [scale for scale in PROVIDER_SCALES if tuple(scale) not in used_scales] or PROVIDER_SCALES
+    for i, provider in enumerate(remaining):
+        mapping[provider] = available_scales[i % len(available_scales)]
+    return mapping
 
 
 def _provider_shades(scale, n):
