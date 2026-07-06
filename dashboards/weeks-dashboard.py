@@ -93,6 +93,7 @@ def _build_week_html(
     subjects: dict,
     max_bar_height_px: float,
     display_mode: str = "proportional",
+    day_totals: dict = None,
 ) -> tuple:
     """Build HTML string and required iframe height for one week section.
 
@@ -114,7 +115,7 @@ def _build_week_html(
     # Compute the actual content height needed.
     max_content_h = max_bar_height_px
 
-    iframe_height = int(max_content_h) + 80  # 40px header + 40px padding
+    iframe_height = int(max_content_h) + 60  # 40px header + 20px padding
 
     day_cols_html = []
     for d in active_dates:
@@ -123,7 +124,10 @@ def _build_week_html(
         day_name = WEEKDAY_ABBR[wd]
         date_str = f"{d.month}/{d.day}"
 
-        day_total_min = sum(b["minutes"] for b in blocks)
+        if day_totals is not None:
+            day_total_min = day_totals.get(d, 0)
+        else:
+            day_total_min = sum(b["minutes"] for b in blocks)
         total_str = _fmt_hhmm(day_total_min) if day_total_min else "-"
 
         bar_html_parts = []
@@ -201,7 +205,7 @@ def _build_week_html(
 <meta charset="utf-8">
 <style>
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; color: #333; background: transparent; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; color: #333; background: transparent; height: 100%; position: relative; }}
 .week-days {{ display: flex; gap: 1px; align-items: flex-start; }}
 .day-col {{ flex: 1; min-width: 0; }}
 .day-header {{ text-align: center; padding: 4px 2px 8px; line-height: 1.3; }}
@@ -209,10 +213,21 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
 .day-total {{ color: #777; font-size: 10px; }}
 .day-body {{ position: relative; }}
 .bar-area {{ position: absolute; left: 0; width: 100%; top: 0; bottom: 0; }}
-.block {{ position: absolute; overflow: visible; cursor: default; border-bottom: 1px solid rgba(255,255,255,0.2); }}
+.block {{ position: absolute; overflow: visible; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.2); }}
 .block-fill {{ position: absolute; left: 0; top: 0; pointer-events: none; }}
 .block-fill.meeting-fill::after {{ content: ''; position: absolute; inset: 0; background: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0,0,0,0.1) 4px, rgba(0,0,0,0.1) 8px); pointer-events: none; }}
-.inner-label {{ position: absolute; left: 3px; right: 3px; top: 50%; transform: translateY(-50%); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; color: #333; }}
+.inner-label {{ position: absolute; left: 3px; right: 3px; top: 50%; transform: translateY(-50%); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; color: #333; }}
+#wk-detail-popup {{ position: absolute; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.4); display: none; z-index: 10000; justify-content: center; align-items: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+.detail-card {{ background: #fff; color: #333; padding: 20px; border-radius: 8px; max-width: 400px; width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: 0 4px 20px rgba(0,0,0,0.3); position: relative; }}
+.detail-close {{ position: absolute; top: 10px; right: 10px; cursor: pointer; font-weight: bold; font-size: 18px; color: #999; }}
+.detail-header h2 {{ margin: 0 0 5px 0; font-size: 16px; }}
+.detail-slug {{ font-size: 11px; color: #777; margin-bottom: 10px; }}
+.detail-total {{ font-weight: 600; margin-bottom: 15px; font-size: 13px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+.entry-row {{ display: flex; gap: 10px; font-size: 12px; margin-bottom: 4px; }}
+.entry-time {{ color: #666; min-width: 80px; }}
+.entry-duration {{ font-weight: 600; min-width: 40px; }}
+.entry-comment {{ color: #444; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.decision-row {{ font-size: 11px; color: #777; padding-left: 90px; margin-bottom: 8px; font-style: italic; }}
 .leader-svg {{ position: absolute; left: 0; top: 0; width: 100%; overflow: visible; pointer-events: none; z-index: 2; }}
 .gutter-area {{ display: none; }}
 .outer-label {{ display: none; }}
@@ -226,12 +241,14 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
 </head>
 <body>
 <div id="wk-tooltip"></div>
+<div id="wk-detail-popup"></div>
 <div class="week-days">
 {''.join(day_cols_html)}
 </div>
 <script>
 (function() {{
   var tip = document.getElementById('wk-tooltip');
+  var popup = document.getElementById('wk-detail-popup');
 
   function esc(s) {{
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -243,41 +260,65 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
   }}
 
   function buildTip(d) {{
-    var html = '<b>' + esc(d.slug) + '</b> &middot; ' + esc(d.total);
-    if (d.subject) {{
-      html += '<br><span class="subject-line">' + esc(d.subject) + '</span>';
-    }} else if (d.slug.match(/^[A-Z]+-\\d+$/)) {{
-      html += '<br><span class="missing-line">subject not cached in sprint file</span>';
-    }}
-    for (var i = 0; i < d.entries.length; i++) {{
-      var e = d.entries[i];
-      var range = e.start && e.end ? e.start + '-' + e.end + ' &middot; ' : '';
-      html += '<br><span class="entry-line">' + range + fmtMin(e.minutes) + 'm';
-      if (e.comment) html += ' &middot; ' + esc(e.comment);
-      html += '</span>';
-      if (e.decision) {{
-        html += '<br><span class="decision-line">&#8627; ' + esc(e.decision) + '</span>';
-      }}
-    }}
-    return html;
+    var subject = d.subject ? esc(d.subject) : null;
+    var slug = esc(d.slug);
+    var header = subject ? '<b>' + subject + '</b> (' + slug + ')' : '<b>' + slug + '</b>';
+    return header + ' &middot; ' + esc(d.total);
   }}
 
+  function buildDetail(d) {{
+    var subject = d.subject ? esc(d.subject) : null;
+    var slug = esc(d.slug);
+    var title = subject || slug;
+    var subtitle = subject ? '<div class="detail-slug">' + slug + '</div>' : '';
+    var rows = '';
+    for (var i = 0; i < d.entries.length; i++) {{
+      var e = d.entries[i];
+      var range = e.start && e.end ? esc(e.start) + '-' + esc(e.end) : '';
+      rows += '<div class="entry-row">'
+        + '<span class="entry-time">' + range + '</span>'
+        + '<span class="entry-duration">' + fmtMin(e.minutes) + '</span>'
+        + '<span class="entry-comment">' + esc(e.comment) + '</span>'
+        + '</div>';
+      if (e.decision) {{
+        rows += '<div class="decision-row">&#8627; ' + esc(e.decision) + '</div>';
+      }}
+    }}
+    return '<div class="detail-card">'
+      + '<span class="detail-close" id="wk-detail-close">&times;</span>'
+      + '<div class="detail-header"><h2>' + esc(title) + '</h2>' + subtitle + '</div>'
+      + '<div class="detail-total">Total: ' + esc(d.total) + '</div>'
+      + rows
+      + '</div>';
+  }}
+
+  function hideDetail() {{
+    popup.style.display = 'none';
+    popup.innerHTML = '';
+  }}
+
+  function showDetail(d) {{
+    tip.style.display = 'none';
+    popup.innerHTML = buildDetail(d);
+    popup.style.display = 'flex';
+    document.getElementById('wk-detail-close').addEventListener('click', hideDetail);
+  }}
+
+  popup.addEventListener('click', function(e) {{
+    if (e.target === popup) hideDetail();
+  }});
+
   function position(e) {{
-    var x = e.clientX + 14, y = e.clientY + 14;
+    var cx = e.clientX, cy = e.clientY;
+    var gap = 14;
+    var tw = tip.offsetWidth;
+    var th = tip.offsetHeight;
+    var x = (cx + gap + tw < window.innerWidth - 4) ? cx + gap : cx - gap - tw;
+    var y = (cy + gap + th < window.innerHeight - 4) ? cy + gap : cy - gap - th;
+    if (x < 4) x = 4;
+    if (y < 4) y = 4;
     tip.style.left = x + 'px';
     tip.style.top = y + 'px';
-    var r = tip.getBoundingClientRect();
-    if (r.bottom > window.innerHeight - 8) {{
-      tip.style.top = (e.clientY - r.height - 14) + 'px';
-      r = tip.getBoundingClientRect();
-    }}
-    if (r.top < 8) tip.style.top = '8px';
-
-    if (r.right > window.innerWidth - 8) {{
-      tip.style.left = (e.clientX - r.width - 14) + 'px';
-      r = tip.getBoundingClientRect();
-    }}
-    if (r.left < 8) tip.style.left = '8px';
   }}
 
   document.querySelectorAll('.block').forEach(function(el) {{
@@ -290,6 +331,11 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
     el.addEventListener('mousemove', position);
     el.addEventListener('mouseleave', function() {{
       tip.style.display = 'none';
+    }});
+    el.addEventListener('click', function(e) {{
+      var d = JSON.parse(el.dataset.tip);
+      showDetail(d);
+      e.stopPropagation();
     }});
   }});
 }})();
@@ -340,7 +386,7 @@ def main():
     if not sprint_data["has_sprint_data"]:
         st.caption(
             "Sprint data has not been backfilled yet. "
-            "Run: python3 scripts/update-sprint-data.py --backfill-from-time"
+            "Run: python3 /home/dan/Performek/work/scripts/update-sprint-data.py --backfill-dates"
         )
 
     colors = color_map(all_days)
@@ -387,10 +433,10 @@ def main():
     seed_widget_state("w_personal", st.query_params.get("w_personal", "0") == "1")
     include_personal = st.sidebar.checkbox("Personal", key="w_personal")
 
-    seed_widget_state("w_min_size", int(st.query_params.get("w_min_size", "0")))
-    min_size = st.sidebar.slider("Min block size (min)", 0, 60, 0, key="w_min_size")
+    seed_widget_state("w_min_size", int(st.query_params.get("w_min_size", "5")))
+    min_size = st.sidebar.slider("Min block size (min)", 0, 60, 5, key="w_min_size")
 
-    seed_widget_state("w_mode", st.query_params.get("w_mode", "proportional"))
+    seed_widget_state("w_mode", st.query_params.get("w_mode", "fixed-line"))
     display_mode = st.sidebar.radio("Display Mode", ["proportional", "fixed-line"], key="w_mode")
 
     persist_query_params({
@@ -452,20 +498,6 @@ def main():
         px_per_min = min(1.0, MAX_DAY_HEIGHT_PX / max_day_minutes)
         max_bar_height_px = max_day_minutes * px_per_min
 
-    # Legend popover.
-    legend_rows = _legend_rows(all_days, selected_week_keys, colors, sprint_data["subjects"])
-    with st.popover("Legend"):
-        for row in legend_rows:
-            swatch = f'<span style="display:inline-block;width:12px;height:12px;background:{row["color"]};border-radius:2px;margin-right:6px;vertical-align:middle"></span>'
-            label = html.escape(row["display_label"])
-            subj = f' - {html.escape(row["subject"])}' if row["subject"] else ""
-            mins = _fmt_hhmm(row["minutes"])
-            st.markdown(
-                f'{swatch}<b>{label}</b>{subj} &nbsp; {mins}',
-                unsafe_allow_html=True,
-            )
-        st.caption("Meetings: diagonal stripe overlay. Personal: desaturated (shown only when toggle is on).")
-
     # Render each selected week, newest first.
     for wk_key in selected_week_keys:
         iso = week_key_to_iso[wk_key]
@@ -482,6 +514,9 @@ def main():
             }
             wk_data = {d: g for d, g in wk_data.items() if g}
             
+        # Compute daily totals for the header based on the filtered data.
+        day_totals = {d: sum(g["minutes"] for g in groups.values()) for d, groups in wk_data.items()}
+
         wk_layout = layout_week(wk_data, px_per_min, display_mode)
         wk_dates = _week_dates(isoyear, isoweek)
 
@@ -492,6 +527,7 @@ def main():
             sprint_data["subjects"],
             max_bar_height_px,
             display_mode,
+            day_totals=day_totals,
         )
         components.html(week_html, height=iframe_height, scrolling=False)
 
