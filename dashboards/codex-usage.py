@@ -14,7 +14,8 @@ Codex records rollout sessions as JSONL under ~/.codex*/sessions/YYYY/MM/DD/ and
 once a session ends, under ~/.codex*/archived_sessions/. Each token_count event
 carries a cumulative total_token_usage and a per-turn last_token_usage; Codex
 emits each one twice, so consecutive duplicates (same cumulative total) are
-skipped.
+skipped. Reasoning output tokens are counted as output cost because they are a
+separate Codex field but still model-generated output.
 """
 
 import argparse
@@ -84,7 +85,8 @@ def load_session_events(jsonl_file: Path, project_filter: str | None,
                 input_tokens = last.get("input_tokens", 0)
                 cached = last.get("cached_input_tokens", 0)
                 output_tokens = last.get("output_tokens", 0)
-                if not (input_tokens or cached or output_tokens):
+                reasoning_output_tokens = last.get("reasoning_output_tokens", 0)
+                if not (input_tokens or cached or output_tokens or reasoning_output_tokens):
                     continue
 
                 ts_str = entry.get("timestamp")
@@ -111,7 +113,7 @@ def load_session_events(jsonl_file: Path, project_filter: str | None,
                     # input_tokens is the full input incl. cached; split it out
                     # so cached tokens are priced at the cache-read rate.
                     "input": max(input_tokens - cached, 0),
-                    "output": output_tokens,
+                    "output": output_tokens + reasoning_output_tokens,
                     "cache_write": 0,
                     "cache_read": cached,
                 })
@@ -129,13 +131,11 @@ def session_id_of(jsonl_file: Path) -> str:
     return stem
 
 
-def load_events(codex_dirs: list[Path], project_filter: str | None,
+def load_events(codex_dir: Path, project_filter: str | None,
                 start: datetime | None, end: datetime | None):
     events = []
     seen_sessions = set()
-    search_dirs = []
-    for codex_dir in codex_dirs:
-        search_dirs += [codex_dir / "sessions", codex_dir / "archived_sessions"]
+    search_dirs = [codex_dir / "sessions", codex_dir / "archived_sessions"]
     files = []
     for d in search_dirs:
         if d.is_dir():
@@ -175,10 +175,18 @@ def main():
     # here, at write time, so the dashboard reads final project paths verbatim.
     resolve_project = build_project_resolver(output_dir)
 
-    events = load_events(codex_dirs, args.project, start, end)
-    for e in events:
-        e["project"] = resolve_project(e["project"])
-    if not write_events(events, output_dir, "codex", pricing_db):
+    any_events = False
+    for codex_dir in codex_dirs:
+        # Derive file prefix from dir name: strip leading dot (e.g. .codex-eng -> codex-eng)
+        prefix = codex_dir.name.lstrip(".")
+
+        events = load_events(codex_dir, args.project, start, end)
+        for e in events:
+            e["project"] = resolve_project(e["project"])
+        if write_events(events, output_dir, prefix, pricing_db):
+            any_events = True
+
+    if not any_events:
         print("No events found.", file=sys.stderr)
         sys.exit(1)
 
