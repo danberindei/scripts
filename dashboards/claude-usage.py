@@ -59,6 +59,7 @@ def load_events(config_dir: Path, project_filter: str | None, start: datetime | 
         actual_cwd = None
         project_events = []
         for jsonl_file in project_dir.glob("*.jsonl"):
+            seen_requests = set()
             try:
                 with open(jsonl_file) as f:
                     for line in f:
@@ -79,6 +80,19 @@ def load_events(config_dir: Path, project_filter: str | None, start: datetime | 
                         usage = msg.get("usage")
                         if not usage:
                             continue
+
+                        request_id = entry.get("requestId")
+                        dedupe_key = (
+                            request_id,
+                            msg.get("model", "unknown"),
+                            usage.get("input_tokens", 0),
+                            usage.get("output_tokens", 0),
+                            usage.get("cache_creation_input_tokens", 0),
+                            usage.get("cache_read_input_tokens", 0),
+                        )
+                        if dedupe_key in seen_requests:
+                            continue
+                        seen_requests.add(dedupe_key)
 
                         ts_str = entry.get("timestamp")
                         if not ts_str:
