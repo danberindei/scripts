@@ -87,9 +87,10 @@ def check_window(label, window, now_ms, dur_ms):
     elapsed_frac = elapsed_ms / dur_ms
     if elapsed_frac <= 0:
         return None
-    expected_remaining = 2 + (1 - elapsed_frac) * 98
+    expected_remaining = 2 + (1 - elapsed_frac) * 100
     if remaining < expected_remaining * 0.5:
-        return f"{label}: {_round_half_up(remaining)}% left, expected {_round_half_up(expected_remaining)}%"
+        wait_min = (reset_ms - now_ms) // 60000
+        return f"{label}: {_round_half_up(remaining)}% left, expected {_round_half_up(expected_remaining)}% (resets in {wait_min}m)"
     return None
 
 
