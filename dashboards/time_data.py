@@ -8,17 +8,51 @@ from pathlib import Path
 
 DEFAULT_DATA_DIR = Path(os.environ.get("TIME_DATA_DIR", Path.home() / "Performek" / "work" / "time"))
 
-# Pastel palette (12 colors) for high legibility with dark text.
-PAIRED = [
-    "#AEC6CF", "#B2DFB2", "#FFB7B2", "#FDFD96",
-    "#CDBBFF", "#FFD1DC", "#B3E5BE", "#A7C7E7",
-    "#FFF9C4", "#F8BBD0", "#E1BEE7", "#C8E6C9",
+# Weekly calendar palette. Intentionally custom pastels; this is not ColorBrewer
+# "Paired", and the blocks should stay soft even after multiple palette cycles.
+PASTELS = [
+    "#B8D8E8", "#CFE8C6", "#F2C6C2", "#F8E7B5",
+    "#D9C6F2", "#F6D1DC", "#C7E8D1", "#C9D8F0",
+    "#F6EFC0", "#EFC7D6", "#DDD1F0", "#D7E8C8",
 ]
+
+# Backward-compatible alias for older imports/tests.
+PAIRED = PASTELS
 
 LABEL_MAX_CHARS = 22
 LABEL_OUTSIDE_THRESHOLD_PX = 16
 LABEL_LINE_HEIGHT_PX = 14
 MAX_DAY_HEIGHT_PX = 800
+
+
+def entries_from_day(day: dict) -> list:
+    """Return a flat entries list from a day dict in either file format.
+
+    Old format: day has an "entries" list where each entry carries kind, ticket,
+    comment, start, end, minutes directly.
+
+    New format: day has "tasks" (list of {name, kind, ticket, worklog_comment})
+    and "segments" (list of {task_name, start, end, minutes, note}).  Each
+    segment is joined to its task to produce an old-style entry, with "comment"
+    filled from the segment's "note" field, plus an extra "task_name" field that
+    slug_of uses to merge ticketless segments of the same task into one block.
+    """
+    if "segments" in day and "tasks" in day:
+        task_map = {t["name"]: t for t in day.get("tasks", [])}
+        entries = []
+        for seg in day.get("segments", []):
+            task = task_map.get(seg.get("task_name", ""), {})
+            entries.append({
+                "start": seg.get("start", ""),
+                "end": seg.get("end", ""),
+                "minutes": seg.get("minutes") or 0,
+                "kind": task.get("kind", "work"),
+                "ticket": task.get("ticket"),
+                "task_name": seg.get("task_name", ""),
+                "comment": seg.get("note", ""),
+            })
+        return entries
+    return day.get("entries", [])
 
 
 def load_days(data_dir: Path) -> list:
@@ -28,7 +62,7 @@ def load_days(data_dir: Path) -> list:
     Returns a list of dicts: {date: date, entries: list}.
     """
     days = []
-    for f in sorted(data_dir.glob("*/*.json")):
+    for f in sorted(data_dir.glob("*/????-??-??.json")):
         try:
             day = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
@@ -40,23 +74,24 @@ def load_days(data_dir: Path) -> list:
             d = date.fromisoformat(d_str)
         except ValueError:
             continue
-        days.append({"date": d, "entries": day.get("entries", [])})
+        days.append({"date": d, "entries": entries_from_day(day)})
     days.sort(key=lambda x: x["date"])
     return days
 
 
 def load_sprints(data_dir: Path) -> dict:
-    """Load sprint files from data_dir/sprints/*.json.
+    """Load sprint files from data_dir/YYYY/sprints/*.json across all year dirs.
 
     Returns a dict with:
         sprints         - list of sprint dicts sorted by start date
         subjects        - merged {ticket_key -> summary} map across all sprint files
         has_sprint_data - True if any sprint files were found
     """
-    sprint_dir = data_dir / "sprints"
     sprints = []
     subjects = {}
-    if sprint_dir.exists():
+    for sprint_dir in sorted(data_dir.glob("*/sprints")):
+        if not sprint_dir.is_dir():
+            continue
         for f in sorted(sprint_dir.glob("*.json")):
             if f.name == "no-sprint.json":
                 continue
@@ -74,8 +109,9 @@ def load_sprints(data_dir: Path) -> dict:
     }
 
 
-def sprint_for_date(d: date, sprints: list):
-    """Return the sprint dict covering date d (start-inclusive, end-exclusive), or None."""
+def sprints_for_date(d: date, sprints: list) -> list:
+    """Return a list of all sprint dicts covering date d (start-inclusive, end-exclusive)."""
+    matches = []
     for sprint in sprints:
         start_str = sprint.get("start")
         end_str = sprint.get("end")
@@ -87,26 +123,33 @@ def sprint_for_date(d: date, sprints: list):
         except ValueError:
             continue
         if start <= d < end:
-            return sprint
-    return None
+            matches.append(sprint)
+    return matches
+
+
+def sprint_for_date(d: date, sprints: list):
+    """Return the sprint dict covering date d (start-inclusive, end-exclusive), or None."""
+    matches = sprints_for_date(d, sprints)
+    return matches[0] if matches else None
 
 
 def slug_of(entry: dict) -> tuple:
     """Return (slug, display_label) for an entry.
 
-    Slug is the ticket key when ticket is set, otherwise the comment verbatim so
-    identical comments merge into one block. Display label is the ticket key as-is,
-    or the comment truncated to LABEL_MAX_CHARS with an ellipsis appended.
+    Slug is the ticket key when ticket is set, otherwise the task name
+    (falling back to the comment) so identical tasks merge into one block.
+    Display label is the ticket key as-is, or the task name/comment
+    truncated to LABEL_MAX_CHARS with an ellipsis appended.
     """
     ticket = entry.get("ticket")
     if ticket:
         return ticket, ticket
-    comment = entry.get("comment") or ""
-    if len(comment) > LABEL_MAX_CHARS:
-        display = comment[:LABEL_MAX_CHARS] + "..."
+    name = entry.get("task_name") or entry.get("comment") or ""
+    if len(name) > LABEL_MAX_CHARS:
+        display = name[:LABEL_MAX_CHARS] + "..."
     else:
-        display = comment
-    return comment, display
+        display = name
+    return name, display
 
 
 def week_of(d: date) -> tuple:
@@ -177,8 +220,9 @@ def _adjust_lightness(hex_color: str, factor: float) -> str:
 def color_map(all_days: list) -> dict:
     """Build a stable slug -> color map ranked by total minutes across all_days.
 
-    Colors are assigned from PAIRED cyclically. Past the first palette cycle (12
-    slugs), lightness is varied so colors remain distinguishable across cycles.
+    Colors are assigned from the weekly pastel palette cyclically. Past the first
+    palette cycle, only mild lightness shifts are used so later tickets still read
+    as pastels instead of drifting into harsh alert colors.
     Deterministic: no randomness, order depends only on total-minute rank.
     """
     totals: dict = {}
@@ -189,19 +233,16 @@ def color_map(all_days: list) -> dict:
 
     sorted_slugs = sorted(totals.keys(), key=lambda s: -totals[s])
 
-    palette_size = len(PAIRED)
+    palette_size = len(PASTELS)
     result = {}
+    variant_factors = (1.08, 0.94, 1.14, 0.88, 1.02, 0.98)
     for i, slug in enumerate(sorted_slugs):
-        base = PAIRED[i % palette_size]
+        base = PASTELS[i % palette_size]
         cycle = i // palette_size
         if cycle == 0:
             result[slug] = base
-        elif cycle == 1:
-            result[slug] = _adjust_lightness(base, 1.45)
-        elif cycle == 2:
-            result[slug] = _adjust_lightness(base, 0.65)
         else:
-            result[slug] = _adjust_lightness(base, 1.0 + 0.18 * (cycle - 3))
+            result[slug] = _adjust_lightness(base, variant_factors[(cycle - 1) % len(variant_factors)])
     return result
 
 

@@ -21,14 +21,14 @@ import plotly.express as px
 import streamlit as st
 
 from dashboard_ui import PAIRED, persist_query_params, qp_date, qp_list, seed_widget_state
+from time_data import entries_from_day
 
 DEFAULT_DATA_DIR = Path(os.environ.get("TIME_DATA_DIR", Path.home() / "Performek" / "work" / "time"))
 
 # A real Jira ticket looks like ENG-1234; anything else is a "(...)" placeholder.
 TICKET_RE = re.compile(r"^[A-Z]+-\d+$")
 
-# Labels for non-work entries whose ticket field is null. Meetings fall back to the
-# day's meeting_ticket (handled in the loader) before reaching these.
+# Labels for non-work entries whose ticket field is null.
 NULL_TICKET_LABELS = {
     "meeting": "(meetings)",
     "personal": "(personal)",
@@ -59,17 +59,14 @@ def classify_untracked(comment: str) -> str:
     return "(other)"
 
 
-def resolve_ticket(kind: str, ticket, meeting_ticket, comment: str = "") -> str:
+def resolve_ticket(kind: str, ticket, comment: str = "") -> str:
     """Pick a grouping label for an entry's ticket.
 
-    Explicit ticket wins; a meeting with no ticket rolls up to the day's
-    meeting_ticket; ticketless work is classified into an overhead sub-bucket;
-    other kinds get a kind-based placeholder.
+    Explicit ticket wins; ticketless work is classified into an overhead
+    sub-bucket; other kinds get a kind-based placeholder.
     """
     if ticket:
         return ticket
-    if kind == "meeting" and meeting_ticket:
-        return meeting_ticket
     if kind == "work":
         return classify_untracked(comment)
     return NULL_TICKET_LABELS.get(kind, "(untracked)")
@@ -125,18 +122,17 @@ def load_entries(data_dir: Path) -> pd.DataFrame:
     st.cache_data keys on the decorated function's own source, not its callees.
     """
     rows = []
-    for f in sorted(data_dir.glob("*/*.json")):
+    for f in sorted(data_dir.glob("*/????-??-??.json")):
         try:
             day = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             continue
         date = day.get("date")
-        meeting_ticket = day.get("meeting_ticket")
-        for e in day.get("entries", []):
+        for e in entries_from_day(day):
             kind = e.get("kind", "work")
             minutes = e.get("minutes") or 0
             comment = e.get("comment", "")
-            ticket = resolve_ticket(kind, e.get("ticket"), meeting_ticket, comment)
+            ticket = resolve_ticket(kind, e.get("ticket"), comment)
             rows.append({
                 "date": date,
                 "kind": kind,

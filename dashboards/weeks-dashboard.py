@@ -19,7 +19,7 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
-from dashboard_ui import persist_query_params, qp_list, seed_widget_state
+from dashboard_ui import persist_query_params, seed_widget_state
 from time_data import (
     DEFAULT_DATA_DIR,
     LABEL_LINE_HEIGHT_PX,
@@ -32,14 +32,76 @@ from time_data import (
     load_sprints,
     slug_of,
     sprint_for_date,
+    sprints_for_date,
     week_of,
 )
 
 WEEKDAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+BLOCK_SIZE_RULES = ["min 1", "min 2", "min 5", "jira"]
+DEFAULT_BLOCK_SIZE_RULE = "jira"
 
 
-def _fmt_hhmm(minutes: int) -> str:
+def _round_jira_worklog_minutes(raw_minutes: float) -> int:
+    """Match the canonical Jira worklog rounder used when posting worklogs.
+
+    Verbatim copy of round_worklog_minutes in
+    ~/Performek/work/scripts/worklog_rounding.py (kept in sync by hand; this
+    dashboard has no import path to that script). Rounding rule:
+    - raw < 1 min: drops to 0 (the only value ever dropped).
+    - 1 <= raw <= 30 min: round(raw + 1) to the nearest 5 min.
+    - raw > 30 min: round(raw + 3) to the nearest 15 min, so 31..34 -> 30 and
+      35+ -> 45.
+    """
+    if raw_minutes < 1:
+        return 0
+    if raw_minutes <= 30:
+        return 5 * math.ceil((raw_minutes + 1) / 5 - 0.5)
+    return 15 * math.ceil((raw_minutes + 3) / 15 - 0.5)
+
+
+def _normalize_block_size_rule(value) -> str:
+    if value in BLOCK_SIZE_RULES:
+        return value
+    legacy_map = {
+        "0": "min 1",
+        "1": "min 1",
+        "2": "min 2",
+        "5": "min 5",
+    }
+    return legacy_map.get(str(value), DEFAULT_BLOCK_SIZE_RULE)
+
+
+def _block_minimum_minutes(rule: str) -> int:
+    rule = _normalize_block_size_rule(rule)
+    return int(rule.split()[1])
+
+
+def _apply_block_size_rule(week_data: dict, block_size_rule: str) -> dict:
+    rule = _normalize_block_size_rule(block_size_rule)
+    adjusted_week = {}
+    for day, day_groups in week_data.items():
+        adjusted_groups = {}
+        for key, value in day_groups.items():
+            raw_minutes = value["minutes"]
+            if rule == "jira":
+                rounded_minutes = _round_jira_worklog_minutes(raw_minutes)
+                if rounded_minutes <= 0:
+                    continue
+                adjusted_value = dict(value)
+                adjusted_value["minutes"] = rounded_minutes
+            else:
+                if raw_minutes < _block_minimum_minutes(rule):
+                    continue
+                adjusted_value = value
+            adjusted_groups[key] = adjusted_value
+        if adjusted_groups:
+            adjusted_week[day] = adjusted_groups
+    return adjusted_week
+
+
+def _fmt_hhmm(minutes) -> str:
+    minutes = int(minutes)
     h = minutes // 60
     m = minutes % 60
     return f"{h}:{m:02d}"
@@ -54,8 +116,8 @@ def _week_dates(isoyear: int, isoweek: int) -> list:
     return [monday + timedelta(days=i) for i in range(7)]
 
 
-def _week_label(isoyear: int, isoweek: int, all_days: list, sprint_data: dict) -> str:
-    """Build the week selector label: 'W27: Jun 29 - Jul 05 (32.4h) - ENG Sprint 212'."""
+def _week_label(isoyear: int, isoweek: int, sprint_data: dict) -> str:
+    """Build the week header base without the hours total: 'W27: Jun 29 - Jul 05 - ENG Sprint 212'."""
     monday = _week_monday(isoyear, isoweek)
     sunday = monday + timedelta(days=6)
     m_abbr = MONTH_ABBR[monday.month - 1]
@@ -63,27 +125,19 @@ def _week_label(isoyear: int, isoweek: int, all_days: list, sprint_data: dict) -
     start_fmt = f"{m_abbr} {monday.day}"
     end_fmt = f"{s_abbr} {sunday.day}"
 
-    week_days_set = {monday + timedelta(days=i) for i in range(7)}
-    total_min = 0
-    for day in all_days:
-        if day["date"] not in week_days_set:
-            continue
-        for entry in day.get("entries", []):
-            if entry.get("kind") != "personal":
-                total_min += entry.get("minutes") or 0
-    total_h = total_min / 60.0
-
     sprint_names = []
     sprints = sprint_data.get("sprints", [])
     seen = set()
-    for d in [monday, sunday]:
-        s = sprint_for_date(d, sprints)
-        if s and s.get("name") and s["name"] not in seen:
-            sprint_names.append(s["name"])
-            seen.add(s["name"])
+    for i in range(7):
+        d = monday + timedelta(days=i)
+        found_sprints = sprints_for_date(d, sprints)
+        for s in found_sprints:
+            if s.get("name") and s["name"] not in seen:
+                sprint_names.append(s["name"])
+                seen.add(s["name"])
     sprint_part = " - " + " / ".join(sprint_names) if sprint_names else ""
 
-    return f"W{isoweek}: {start_fmt} - {end_fmt} ({total_h:.1f}h){sprint_part}"
+    return f"W{isoweek}: {start_fmt} - {end_fmt}{sprint_part}"
 
 
 def _build_week_html(
@@ -408,21 +462,91 @@ def main():
     }
 
     week_labels = {
-        wk_key: _week_label(*week_key_to_iso[wk_key], all_days, sprint_data)
+        wk_key: _week_label(*week_key_to_iso[wk_key], sprint_data)
         for wk_key in all_week_keys
     }
 
     # Sidebar controls - all state via w_-prefixed keys + query params.
-    st.sidebar.header("Weeks")
 
-    default_weeks = [all_week_keys[0]] if all_week_keys else []
-    seed_widget_state("w_weeks", qp_list("w_weeks", all_week_keys) or default_weeks)
-    selected_week_keys = st.sidebar.multiselect(
-        "Select weeks",
-        options=all_week_keys,
-        format_func=lambda k: week_labels.get(k, k),
-        key="w_weeks",
-    )
+    sprints_list = sprint_data.get("sprints", [])
+
+    # Deduplicate sprints by name, keeping the last occurrence (most up-to-date).
+    seen_sprint_names: dict = {}
+    for s in sprints_list:
+        if s.get("name") and s.get("start") and s.get("end"):
+            seen_sprint_names[s["name"]] = s
+    unique_sprints = sorted(seen_sprint_names.values(), key=lambda s: s["start"])
+    sprint_by_name = {s["name"]: s for s in unique_sprints}
+
+    today = date.today()
+    current_sprints = sprints_for_date(today, unique_sprints)
+    if current_sprints:
+        default_start = min(date.fromisoformat(s["start"]) for s in current_sprints)
+        default_end = max(date.fromisoformat(s["end"]) - timedelta(days=1) for s in current_sprints)
+    else:
+        default_start = today - timedelta(days=today.weekday())
+        default_end = today
+
+    qp_start = st.query_params.get("w_start")
+    qp_end = st.query_params.get("w_end")
+    try:
+        seed_start = date.fromisoformat(qp_start) if qp_start else default_start
+        seed_end = date.fromisoformat(qp_end) if qp_end else default_end
+    except ValueError:
+        seed_start, seed_end = default_start, default_end
+    seed_widget_state("w_date_range", (seed_start, seed_end))
+
+    if "w_selected_sprints" not in st.session_state:
+        st.session_state["w_selected_sprints"] = {s["name"] for s in current_sprints}
+
+    date_range = st.sidebar.date_input("Date range", key="w_date_range")
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        range_start, range_end = date_range[0], date_range[1]
+    else:
+        range_start = range_end = date_range[0] if date_range else default_start
+
+    # Sprint shortcut buttons: last 3 per project, newest-first in a row.
+    # Clicking toggles selection; the date range becomes the union of selected sprints.
+    def toggle_sprint(name):
+        sel = st.session_state["w_selected_sprints"]
+        if name in sel:
+            sel.discard(name)
+        else:
+            sel.add(name)
+        if sel:
+            starts = [date.fromisoformat(sprint_by_name[n]["start"]) for n in sel if n in sprint_by_name]
+            ends = [date.fromisoformat(sprint_by_name[n]["end"]) - timedelta(days=1) for n in sel if n in sprint_by_name]
+            st.session_state["w_date_range"] = (min(starts), max(ends))
+
+    sprint_groups: dict = {}
+    for s in unique_sprints:
+        name = s.get("name", "")
+        prefix = name.split(" Sprint ")[0] if " Sprint " in name else name
+        sprint_groups.setdefault(prefix, []).append(s)
+
+    with st.sidebar:
+        for group in sprint_groups.values():
+            recent = group[-3:]
+            cols = st.columns(len(recent))
+            for i, sprint in enumerate(reversed(recent)):
+                name = sprint["name"]
+                label = name.replace(" Sprint", "")
+                is_sel = name in st.session_state["w_selected_sprints"]
+                with cols[i]:
+                    st.button(
+                        label,
+                        type="primary" if is_sel else "secondary",
+                        on_click=toggle_sprint,
+                        args=(name,),
+                        key=f"w_sprint_btn_{name}",
+                        use_container_width=True,
+                    )
+
+    selected_week_keys = [
+        wk_key for wk_key in all_week_keys
+        if _week_monday(*week_key_to_iso[wk_key]) <= range_end
+        and _week_monday(*week_key_to_iso[wk_key]) + timedelta(days=6) >= range_start
+    ]
 
     seed_widget_state("w_ticket", st.query_params.get("w_ticket", "1") == "1")
     include_ticket = st.sidebar.checkbox("Ticket", key="w_ticket")
@@ -433,23 +557,27 @@ def main():
     seed_widget_state("w_personal", st.query_params.get("w_personal", "0") == "1")
     include_personal = st.sidebar.checkbox("Personal", key="w_personal")
 
-    seed_widget_state("w_min_size", int(st.query_params.get("w_min_size", "5")))
-    min_size = st.sidebar.slider("Min block size (min)", 0, 60, 5, key="w_min_size")
+    block_size_rule_seed = _normalize_block_size_rule(
+        st.query_params.get("w_block_size_rule", st.query_params.get("w_min_size"))
+    )
+    seed_widget_state("w_block_size_rule", block_size_rule_seed)
+    block_size_rule = st.sidebar.select_slider("Block size rules", options=BLOCK_SIZE_RULES, key="w_block_size_rule")
 
     seed_widget_state("w_mode", st.query_params.get("w_mode", "fixed-line"))
     display_mode = st.sidebar.radio("Display Mode", ["proportional", "fixed-line"], key="w_mode")
 
     persist_query_params({
-        "w_weeks": selected_week_keys,
+        "w_start": str(range_start),
+        "w_end": str(range_end),
         "w_ticket": "1" if include_ticket else "0",
         "w_ticketless": "1" if include_ticketless else "0",
         "w_personal": "1" if include_personal else "0",
-        "w_min_size": str(min_size),
+        "w_block_size_rule": block_size_rule,
         "w_mode": display_mode,
     })
 
     if not selected_week_keys:
-        st.info("Select one or more weeks from the sidebar.")
+        st.info("No weeks with data in the selected date range.")
         st.stop()
 
     # Compute shared vertical scale from the tallest day across all selected weeks.
@@ -457,16 +585,10 @@ def main():
     for wk_key in selected_week_keys:
         iso = week_key_to_iso[wk_key]
         days_this_week = week_day_map.get(iso, [])
-        wk_data = group_week(days_this_week, include_ticket, include_ticketless, include_personal)
-        
-        # Filter by minimum size for scale calculation
-        if min_size > 0:
-            wk_data = {
-                d: {k: v for k, v in day_groups.items() if v["minutes"] >= min_size}
-                for d, day_groups in wk_data.items()
-            }
-            # Remove empty days
-            wk_data = {d: g for d, g in wk_data.items() if g}
+        wk_data = _apply_block_size_rule(
+            group_week(days_this_week, include_ticket, include_ticketless, include_personal),
+            block_size_rule,
+        )
 
         for d_groups in wk_data.values():
             day_total = sum(g["minutes"] for g in d_groups.values())
@@ -474,48 +596,46 @@ def main():
                 max_day_minutes = day_total
 
     if max_day_minutes == 0:
-        st.warning("No data in the selected weeks.")
+        st.warning("No blocks to show: the selected block size rule dropped every block in this range.")
         st.stop()
 
     if display_mode == "fixed-line":
         px_per_min = LABEL_LINE_HEIGHT_PX / 60.0
-        
+
         # Find the day that has the most total rounded-up height
         max_rounded_height = 0
         for wk_key in selected_week_keys:
             iso = week_key_to_iso[wk_key]
             days_this_week = week_day_map.get(iso, [])
-            wk_data = group_week(days_this_week, include_ticket, include_ticketless, include_personal)
-            if min_size > 0:
-                wk_data = {d: {k: v for k, v in g.items() if v["minutes"] >= min_size} for d, g in wk_data.items()}
-            
+            wk_data = _apply_block_size_rule(
+                group_week(days_this_week, include_ticket, include_ticketless, include_personal),
+                block_size_rule,
+            )
+
             for d_groups in wk_data.values():
                 day_rounded_h = sum(math.ceil(g["minutes"] / 60.0) * LABEL_LINE_HEIGHT_PX for g in d_groups.values())
                 if day_rounded_h > max_rounded_height:
                     max_rounded_height = day_rounded_h
         max_bar_height_px = max_rounded_height
     else:
-        px_per_min = min(1.0, MAX_DAY_HEIGHT_PX / max_day_minutes)
+        px_per_min = min(1.0, MAX_DAY_HEIGHT_PX / max_day_minutes) if max_day_minutes else 1.0
         max_bar_height_px = max_day_minutes * px_per_min
 
     # Render each selected week, newest first.
     for wk_key in selected_week_keys:
         iso = week_key_to_iso[wk_key]
         isoyear, isoweek = iso
-        st.subheader(week_labels[wk_key])
 
         days_this_week = week_day_map.get(iso, [])
-        wk_data = group_week(days_this_week, include_ticket, include_ticketless, include_personal)
-        
-        if min_size > 0:
-            wk_data = {
-                d: {k: v for k, v in day_groups.items() if v["minutes"] >= min_size}
-                for d, day_groups in wk_data.items()
-            }
-            wk_data = {d: g for d, g in wk_data.items() if g}
-            
+        wk_data = _apply_block_size_rule(
+            group_week(days_this_week, include_ticket, include_ticketless, include_personal),
+            block_size_rule,
+        )
+
         # Compute daily totals for the header based on the filtered data.
         day_totals = {d: sum(g["minutes"] for g in groups.values()) for d, groups in wk_data.items()}
+        total_h = sum(day_totals.values()) / 60.0
+        st.subheader(f"{week_labels[wk_key]} ({total_h:.1f}h)")
 
         wk_layout = layout_week(wk_data, px_per_min, display_mode)
         wk_dates = _week_dates(isoyear, isoweek)

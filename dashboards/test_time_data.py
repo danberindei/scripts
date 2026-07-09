@@ -1,5 +1,6 @@
 """Tests for time_data.py helpers."""
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -9,9 +10,11 @@ from time_data import (
     LABEL_LINE_HEIGHT_PX,
     LABEL_MAX_CHARS,
     LABEL_OUTSIDE_THRESHOLD_PX,
+    PASTELS,
     PAIRED,
     _adjust_lightness,
     color_map,
+    entries_from_day,
     group_week,
     layout_week,
     load_days,
@@ -182,6 +185,11 @@ def test_color_map_ranked_by_total_minutes():
     assert colors["ENG-LOW"] == PAIRED[1]
 
 
+def test_weekly_palette_keeps_red_slot_pastel():
+    assert PASTELS[2] == "#F2C6C2"
+    assert PAIRED is PASTELS
+
+
 def test_color_map_stable_regardless_of_week_selection():
     d1 = date(2026, 6, 22)
     d2 = date(2026, 6, 29)
@@ -322,6 +330,69 @@ def test_sprint_for_date_no_sprint_skipped():
     assert sprint_for_date(date(2026, 6, 10), sprints)["id"] == 1
 
 
+# --- entries_from_day ---
+
+def test_entries_from_day_old_format_passthrough():
+    day = {"date": "2026-07-05", "entries": [
+        {"start": "09:00", "end": "09:30", "minutes": 30, "kind": "work", "ticket": "ENG-1", "comment": "x"},
+    ]}
+    result = entries_from_day(day)
+    assert result == day["entries"]
+
+
+def test_entries_from_day_new_format_joins_task_metadata():
+    day = {
+        "date": "2026-07-01",
+        "tasks": [
+            {"name": "eng-task", "kind": "work", "ticket": "ENG-6908", "worklog_comment": "fix"},
+            {"name": "standup", "kind": "meeting", "ticket": "ENG-6880", "worklog_comment": None},
+        ],
+        "segments": [
+            {"task_name": "eng-task", "start": "08:30", "end": "08:38", "minutes": 7, "note": "sudoers edits"},
+            {"task_name": "standup", "start": "09:46", "end": "09:53", "minutes": 8, "note": "ENG standup"},
+        ],
+    }
+    result = entries_from_day(day)
+    assert len(result) == 2
+    expected0 = {"start": "08:30", "end": "08:38", "minutes": 7, "kind": "work", "ticket": "ENG-6908", "comment": "sudoers edits"}
+    expected1 = {"start": "09:46", "end": "09:53", "minutes": 8, "kind": "meeting", "ticket": "ENG-6880", "comment": "ENG standup"}
+    assert expected0.items() <= result[0].items()
+    assert expected1.items() <= result[1].items()
+    assert result[0]["task_name"] == "eng-task"
+    assert result[1]["task_name"] == "standup"
+
+
+def test_entries_from_day_new_format_unknown_task_defaults_work():
+    day = {
+        "tasks": [],
+        "segments": [{"task_name": "missing", "start": "10:00", "end": "10:10", "minutes": 10, "note": "orphan"}],
+    }
+    result = entries_from_day(day)
+    assert len(result) == 1
+    assert result[0]["kind"] == "work"
+    assert result[0]["ticket"] is None
+    assert result[0]["comment"] == "orphan"
+
+
+def test_entries_from_day_new_format_missing_entries_key_returns_empty():
+    day = {"date": "2026-07-01", "tasks": [], "segments": []}
+    assert entries_from_day(day) == []
+
+
+def test_load_days_handles_new_format(tmp_path):
+    year = tmp_path / "2026"
+    year.mkdir()
+    (year / "2026-07-01.json").write_text(json.dumps({
+        "date": "2026-07-01",
+        "tasks": [{"name": "t1", "kind": "work", "ticket": "ENG-1", "worklog_comment": None}],
+        "segments": [{"task_name": "t1", "start": "09:00", "end": "09:30", "minutes": 30, "note": "impl"}],
+    }))
+    days = load_days(tmp_path)
+    assert len(days) == 1
+    assert days[0]["entries"][0]["ticket"] == "ENG-1"
+    assert days[0]["entries"][0]["comment"] == "impl"
+
+
 # --- load_days ---
 
 def test_load_days_sorts_by_date(tmp_path):
@@ -342,6 +413,15 @@ def test_load_days_skips_invalid_json(tmp_path):
     assert len(days) == 1
 
 
+def test_load_days_skips_workstreams_json(tmp_path):
+    year = tmp_path / "2026"
+    year.mkdir()
+    (year / "workstreams.json").write_text('{"some-workstream":{"label":"foo"}}')
+    (year / "2026-06-29.json").write_text('{"date":"2026-06-29","entries":[]}')
+    days = load_days(tmp_path)
+    assert len(days) == 1
+
+
 def test_load_days_empty_dir_returns_empty(tmp_path):
     assert load_days(tmp_path) == []
 
@@ -349,13 +429,13 @@ def test_load_days_empty_dir_returns_empty(tmp_path):
 # --- load_sprints ---
 
 def test_load_sprints_merges_subjects(tmp_path):
-    sprints_dir = tmp_path / "sprints"
-    sprints_dir.mkdir()
-    (sprints_dir / "sprint-1.json").write_text(
+    sprints_dir = tmp_path / "2026" / "sprints"
+    sprints_dir.mkdir(parents=True)
+    (sprints_dir / "2026-06-08_2026-06-22_ENG_Sprint_210.json").write_text(
         '{"id":1,"name":"S1","start":"2026-06-08","end":"2026-06-22","state":"closed",'
         '"meeting_ticket":"ENG-100","tickets":{"ENG-1":"Foo"}}'
     )
-    (sprints_dir / "sprint-2.json").write_text(
+    (sprints_dir / "2026-06-22_2026-07-06_ENG_Sprint_211.json").write_text(
         '{"id":2,"name":"S2","start":"2026-06-22","end":"2026-07-06","state":"active",'
         '"meeting_ticket":"ENG-200","tickets":{"ENG-2":"Bar"}}'
     )
@@ -363,6 +443,21 @@ def test_load_sprints_merges_subjects(tmp_path):
     assert result["has_sprint_data"] is True
     assert result["subjects"]["ENG-1"] == "Foo"
     assert result["subjects"]["ENG-2"] == "Bar"
+    assert len(result["sprints"]) == 2
+
+
+def test_load_sprints_merges_across_years(tmp_path):
+    for year, sprint_id, ticket in [("2025", "ENG-10", "ENG-10"), ("2026", "ENG-20", "ENG-20")]:
+        d = tmp_path / year / "sprints"
+        d.mkdir(parents=True)
+        (d / f"{year}-06-01_{year}-06-15_Sprint.json").write_text(
+            f'{{"id":"{sprint_id}","name":"S","start":"{year}-06-01","end":"{year}-06-15",'
+            f'"state":"closed","tickets":{{"{ticket}":"Summary"}}}}'
+        )
+    result = load_sprints(tmp_path)
+    assert result["has_sprint_data"] is True
+    assert "ENG-10" in result["subjects"]
+    assert "ENG-20" in result["subjects"]
     assert len(result["sprints"]) == 2
 
 
