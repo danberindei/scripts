@@ -13,14 +13,14 @@ Usage:
 import json
 import os
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from dashboard_ui import PAIRED, persist_query_params, qp_date, qp_list, seed_widget_state
+from dashboard_ui import PAIRED, get_date, get_list, get_str, persist, seed_widget_state
 from time_data import entries_from_day
 
 DEFAULT_DATA_DIR = Path(os.environ.get("TIME_DATA_DIR", Path.home() / "Performek" / "work" / "time"))
@@ -167,30 +167,34 @@ def main() -> None:
     all_kinds = sorted(df["kind"].unique())
     all_tickets = sorted(df["ticket"].unique())
 
-    # Every control is bound to session_state via key= and seeded once from the query
-    # params, rather than fed value=/default= each rerun. A recomputed value= fights the
-    # query-param write-back below (the widget snaps back mid-change), which is the
-    # choppiness the grain slider showed. Keys/params are t_-prefixed and page-specific:
-    # this app is one st.navigation instance whose session_state and query params are
-    # shared across pages, so unprefixed names would collide with the agents page (whose
-    # split-by options and finer grains aren't valid here).
+    # Every control is bound to session_state via key= and seeded once from the stored
+    # settings, rather than fed value=/default= each rerun. A recomputed value= fights the
+    # localStorage write-back below (the widget snaps back mid-change), which is the
+    # choppiness the grain slider showed. Setting names are t_-prefixed and page-specific:
+    # this app is one st.navigation instance whose session_state and localStorage store
+    # are shared across pages, so unprefixed names would collide with the agents page
+    # (whose split-by options and finer grains aren't valid here).
+    # The range max extends to today so the default range includes it even when the
+    # newest tracked entry predates today.
+    today = date.today()
+    range_max = max(max_date, today)
     dc1, dc2 = st.sidebar.columns(2)
-    default_start = max(min_date, max_date - timedelta(days=7))
-    seed_widget_state("t_start", qp_date("t_start", default_start))
-    seed_widget_state("t_end", qp_date("t_end", max_date))
-    start_date = dc1.date_input("Start date", min_value=min_date, max_value=max_date, key="t_start")
-    end_date = dc2.date_input("End date", min_value=min_date, max_value=max_date, key="t_end")
+    default_start = max(min_date, today - timedelta(days=7))
+    seed_widget_state("t_start", get_date("t_start", default_start))
+    seed_widget_state("t_end", get_date("t_end", today))
+    start_date = dc1.date_input("Start date", min_value=min_date, max_value=range_max, key="t_start")
+    end_date = dc2.date_input("End date", min_value=min_date, max_value=range_max, key="t_end")
 
     # Time entries are day-grained, so only the 1w/1d subset is meaningful here.
     grain_opts = ["1w", "1d"]
-    _g = st.query_params.get("t_grain", "1d")
+    _g = get_str("t_grain", "1d")
     seed_widget_state("t_grain", _g if _g in grain_opts else "1d")
     grain = st.sidebar.select_slider("Time granularity", options=grain_opts, key="t_grain")
 
     # Default to every kind except "personal" so the charts open on work-relevant time.
-    seed_widget_state("t_kind", qp_list("t_kind", all_kinds) or [k for k in all_kinds if k != "personal"])
+    seed_widget_state("t_kind", get_list("t_kind", all_kinds) or [k for k in all_kinds if k != "personal"])
     selected_kinds = st.sidebar.multiselect("Kind", all_kinds, key="t_kind")
-    seed_widget_state("t_ticket", qp_list("t_ticket", all_tickets) or [])
+    seed_widget_state("t_ticket", get_list("t_ticket", all_tickets) or [])
     selected_tickets = st.sidebar.multiselect("Ticket (leave empty for all)", all_tickets, key="t_ticket")
 
     # --- Filter ---
@@ -200,8 +204,8 @@ def main() -> None:
         mask &= df["ticket"].isin(selected_tickets)
     display = df[mask].copy()
 
-    # --- Persist sidebar state to query params ---
-    persist_query_params({
+    # --- Persist sidebar state to localStorage ---
+    persist({
         "t_start": str(start_date),
         "t_end": str(end_date),
         "t_grain": grain,
@@ -234,11 +238,11 @@ def main() -> None:
 
     # --- Hours split by chosen dimensions; both charts share one axis-orientation toggle ---
     ctrl1, ctrl2 = st.columns([3, 2])
-    seed_widget_state("t_split_dims", [d for d in st.query_params.get_all("t_split_dims") if d in DIM_OPTIONS] or ["ticket"])
+    seed_widget_state("t_split_dims", (get_list("t_split_dims", DIM_OPTIONS) or ["ticket"]))
     split_dims = ctrl1.multiselect("Split by", DIM_OPTIONS, max_selections=len(DIM_OPTIONS), key="t_split_dims")
 
     orient_opts = ["Horizontal", "Vertical"]
-    _o = st.query_params.get("t_orient", "Horizontal")
+    _o = get_str("t_orient", "Horizontal")
     seed_widget_state("t_orient", _o if _o in orient_opts else "Horizontal")
     orient = ctrl2.radio("Bar orientation", orient_opts, key="t_orient", horizontal=True)
     horizontal = orient == "Horizontal"
@@ -287,9 +291,7 @@ def main() -> None:
         st.plotly_chart(fig2, width="stretch")
 
     # --- Persist split_dims and orientation ---
-    persist_query_params({"t_split_dims": split_dims, "t_orient": orient})
-    if st.query_params.get("orient") != orient:
-        st.query_params["orient"] = orient
+    persist({"t_split_dims": split_dims, "t_orient": orient})
 
 
 if __name__ == "__main__":

@@ -30,10 +30,18 @@ def setup_data(tmp_path: Path, monkeypatch) -> Path:
     return data_dir
 
 
-def test_stale_source_query_param_does_not_hide_new_sources(tmp_path: Path, monkeypatch) -> None:
+def _seed_local_storage(app, items: dict) -> None:
+    # dashboard_ui.LocalStorage(key="dashboards_settings") only blocks on a browser
+    # round-trip when this session_state key is missing; pre-seeding it makes the
+    # component non-blocking under AppTest and stands in for the browser store.
+    app.session_state["dashboards_settings"] = dict(items)
+
+
+def test_stale_provider_off_setting_does_not_hide_new_sources(tmp_path: Path, monkeypatch) -> None:
     setup_data(tmp_path, monkeypatch)
     app = AppTest.from_file(str(Path(__file__).parent / "agents-dashboard.py"))
-    app.query_params["source"] = ["claude"]
+    # A provider that no longer exists in the data must not turn off the real ones.
+    _seed_local_storage(app, {"a_provider_off": '["ghost"]'})
 
     app.run()
 
@@ -43,9 +51,10 @@ def test_stale_source_query_param_does_not_hide_new_sources(tmp_path: Path, monk
 def test_deselected_providers_are_persisted_as_provider_off(tmp_path: Path, monkeypatch) -> None:
     setup_data(tmp_path, monkeypatch)
     app = AppTest.from_file(str(Path(__file__).parent / "agents-dashboard.py"))
+    _seed_local_storage(app, {})
 
     app.run()
     app.sidebar.multiselect[0].set_value(["claude"])
     app.run()
 
-    assert app.query_params["a_provider_off"] == ["codex"]
+    assert app.session_state["dashboards_settings"]["a_provider_off"] == '["codex"]'

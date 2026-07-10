@@ -18,7 +18,7 @@ import streamlit as st
 from plotly.colors import sample_colorscale
 
 from agent_usage_common import WORKTREE_MAP_FILE
-from dashboard_ui import PAIRED, persist_query_params, qp_date, qp_list, seed_widget_state
+from dashboard_ui import PAIRED, get_date, get_list, get_str, persist, seed_widget_state
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "agent-usage"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -155,15 +155,15 @@ GRAIN_MINUTES = {"1w": 10080, "1d": MINUTES_PER_DAY, "1h": 60, "30m": 30, "15m":
 today = datetime.now().astimezone().date()
 date_max = max(max_ts.date(), today)
 
-# Every control is bound to session_state via key= and seeded once from the query
-# params, rather than fed value=/default=/index= each rerun. A recomputed arg fights the
-# query-param write-back below (the widget snaps back mid-change), the choppiness the
-# grain slider showed. Keys/params are a_-prefixed and page-specific: this app is one
-# st.navigation instance whose session_state and query params are shared across pages,
-# so unprefixed names would collide with the time page.
+# Every control is bound to session_state via key= and seeded once from the stored
+# settings, rather than fed value=/default=/index= each rerun. A recomputed arg fights
+# the localStorage write-back below (the widget snaps back mid-change), the choppiness
+# the grain slider showed. Setting names are a_-prefixed and page-specific: this app is
+# one st.navigation instance whose session_state and localStorage store are shared
+# across pages, so unprefixed names would collide with the time page.
 dc1, dc2 = st.sidebar.columns(2)
-seed_widget_state("a_start", qp_date("a_start", today - timedelta(days=7)))
-seed_widget_state("a_end", qp_date("a_end", max_ts.date()))
+seed_widget_state("a_start", get_date("a_start", today - timedelta(days=7)))
+seed_widget_state("a_end", get_date("a_end", today))
 start_date = dc1.date_input("Start date", min_value=min_ts.date(), max_value=date_max, key="a_start")
 end_date = dc2.date_input("End date", min_value=min_ts.date(), max_value=date_max, key="a_end")
 
@@ -178,16 +178,16 @@ if refresh_results:
     for name, ok, msg in refresh_results:
         (st.sidebar.success if ok else st.sidebar.warning)(f"{name}: {msg or ('ok' if ok else 'failed')}")
 
-# The query param stores the OFF providers, so the widget's session_state (the ON set)
-# is seeded as the complement.
-seed_widget_state("a_provider", [s for s in providers if s not in set(st.query_params.get_all("a_provider_off"))])
+# The stored setting keeps the OFF providers, so the widget's session_state (the ON
+# set) is seeded as the complement.
+seed_widget_state("a_provider", [s for s in providers if s not in set(get_list("a_provider_off", providers) or [])])
 selected_providers = st.sidebar.multiselect("Provider", providers, key="a_provider")
-seed_widget_state("a_project", qp_list("a_project", all_projects) or [])
+seed_widget_state("a_project", get_list("a_project", all_projects) or [])
 selected_projects = st.sidebar.multiselect("Project (leave empty for all)", all_projects, key="a_project")
 
 _range_key = (str(start_date), str(end_date))
 if "a_grain" not in st.session_state:
-    _g = st.query_params.get("a_grain", "1d")
+    _g = get_str("a_grain", "1d")
     st.session_state["a_grain"] = _g if _g in grains else "1d"
     st.session_state["a_grain_range_key"] = _range_key
 
@@ -213,10 +213,10 @@ if st.session_state.get("a_grain_range_key") != _range_key:
 time_grain = st.sidebar.select_slider("Time granularity", options=grains, key="a_grain")
 
 
-# --- Persist sidebar filter state to query params ---
-# Done here (before any st.stop()) so the URL updates even when no data matches.
+# --- Persist sidebar filter state to localStorage ---
+# Done here (before any st.stop()) so the store updates even when no data matches.
 # split_dims is synced at the bottom since it's defined in the main content area.
-persist_query_params({
+persist({
     "a_start": str(start_date),
     "a_end": str(end_date),
     "a_grain": time_grain,
@@ -347,7 +347,7 @@ TOKEN_TYPE_LABELS = {
 }
 
 
-seed_widget_state("a_split_dims", [d for d in st.query_params.get_all("a_split_dims") if d in DIM_OPTIONS] or ["provider", "project"])
+seed_widget_state("a_split_dims", (get_list("a_split_dims", DIM_OPTIONS) or ["provider", "project"]))
 split_dims = st.multiselect(
     "Split by",
     DIM_OPTIONS,
@@ -422,5 +422,5 @@ else:
     fig.update_traces(hovertemplate="%{x}<br>$%{y:.4f}<extra></extra>")
 st.plotly_chart(fig, width="stretch")
 
-# --- Persist split_dims to query params ---
-persist_query_params({"a_split_dims": split_dims})
+# --- Persist split_dims to localStorage ---
+persist({"a_split_dims": split_dims})

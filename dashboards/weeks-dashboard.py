@@ -19,7 +19,7 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
-from dashboard_ui import persist_query_params, seed_widget_state
+from dashboard_ui import get_date, get_str, persist, seed_widget_state
 from time_data import (
     DEFAULT_DATA_DIR,
     LABEL_LINE_HEIGHT_PX,
@@ -487,13 +487,8 @@ def main():
         default_start = today - timedelta(days=today.weekday())
         default_end = today
 
-    qp_start = st.query_params.get("w_start")
-    qp_end = st.query_params.get("w_end")
-    try:
-        seed_start = date.fromisoformat(qp_start) if qp_start else default_start
-        seed_end = date.fromisoformat(qp_end) if qp_end else default_end
-    except ValueError:
-        seed_start, seed_end = default_start, default_end
+    seed_start = get_date("w_start", default_start)
+    seed_end = get_date("w_end", default_end)
     seed_widget_state("w_date_range", (seed_start, seed_end))
 
     if "w_selected_sprints" not in st.session_state:
@@ -548,25 +543,25 @@ def main():
         and _week_monday(*week_key_to_iso[wk_key]) + timedelta(days=6) >= range_start
     ]
 
-    seed_widget_state("w_ticket", st.query_params.get("w_ticket", "1") == "1")
+    seed_widget_state("w_ticket", get_str("w_ticket", "1") == "1")
     include_ticket = st.sidebar.checkbox("Ticket", key="w_ticket")
 
-    seed_widget_state("w_ticketless", st.query_params.get("w_ticketless", "1") == "1")
+    seed_widget_state("w_ticketless", get_str("w_ticketless", "1") == "1")
     include_ticketless = st.sidebar.checkbox("Ticketless", key="w_ticketless")
 
-    seed_widget_state("w_personal", st.query_params.get("w_personal", "0") == "1")
+    seed_widget_state("w_personal", get_str("w_personal", "0") == "1")
     include_personal = st.sidebar.checkbox("Personal", key="w_personal")
 
     block_size_rule_seed = _normalize_block_size_rule(
-        st.query_params.get("w_block_size_rule", st.query_params.get("w_min_size"))
+        get_str("w_block_size_rule", get_str("w_min_size", None))
     )
     seed_widget_state("w_block_size_rule", block_size_rule_seed)
     block_size_rule = st.sidebar.select_slider("Block size rules", options=BLOCK_SIZE_RULES, key="w_block_size_rule")
 
-    seed_widget_state("w_mode", st.query_params.get("w_mode", "fixed-line"))
+    seed_widget_state("w_mode", get_str("w_mode", "fixed-line"))
     display_mode = st.sidebar.radio("Display Mode", ["proportional", "fixed-line"], key="w_mode")
 
-    persist_query_params({
+    persist({
         "w_start": str(range_start),
         "w_end": str(range_end),
         "w_ticket": "1" if include_ticket else "0",
