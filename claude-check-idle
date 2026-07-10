@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+# Claude Code UserPromptSubmit hook (~/.claude-eng/settings.json).
+# Blocks a prompt when more than IDLE_LIMIT seconds have passed since the last
+# assistant reply, unless the prompt contains a whole-word bypass word.
+import json
+import re
+import sys
+from datetime import datetime, timezone
+
+IDLE_LIMIT = 59 * 60
+BYPASS_WORDS = ("resume", "continue")
+
+bypass_re = re.compile(r"\b(" + "|".join(BYPASS_WORDS) + r")\b", re.IGNORECASE)
+
+
+def last_assistant_epoch(path):
+    last = None
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if entry.get("type") == "assistant" and entry.get("timestamp"):
+                last = entry["timestamp"]
+    if not last:
+        return None
+    ts = datetime.fromisoformat(last.replace("Z", "+00:00"))
+    return ts.timestamp()
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        return 0
+
+    prompt = data.get("prompt") or ""
+    transcript = data.get("transcript_path") or ""
+
+    # Let bypass prompts through regardless of how long we have been idle.
+    if bypass_re.search(prompt):
+        return 0
+
+    if not transcript:
+        return 0
+    try:
+        last_epoch = last_assistant_epoch(transcript)
+    except OSError:
+        return 0
+    if last_epoch is None:
+        return 0
+
+    idle = datetime.now(timezone.utc).timestamp() - last_epoch
+    if idle > IDLE_LIMIT:
+        mins = int(idle // 60)
+        print(
+            f"Blocked: {mins} min since the last assistant reply (>{IDLE_LIMIT}s). "
+            f"Add 'resume' or 'continue' to the message to proceed.",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
