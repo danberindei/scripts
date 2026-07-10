@@ -19,7 +19,7 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
-from dashboard_ui import get_date, get_str, persist, seed_widget_state
+from dashboard_ui import get_date, get_str, persist, repaint_on_page_entry, seed_widget_state
 from time_data import (
     DEFAULT_DATA_DIR,
     LABEL_LINE_HEIGHT_PX,
@@ -645,6 +645,8 @@ def main():
             day_totals=day_totals,
         )
         components.html(week_html, height=iframe_height, scrolling=False)
+
+    repaint_on_page_entry("weeks")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ import streamlit as st
 from plotly.colors import sample_colorscale
 
 from agent_usage_common import WORKTREE_MAP_FILE
-from dashboard_ui import PAIRED, get_date, get_list, get_str, persist, seed_widget_state
+from dashboard_ui import PAIRED, get_date, get_list, get_str, persist, repaint_on_page_entry, seed_widget_state
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "agent-usage"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -424,3 +424,5 @@ st.plotly_chart(fig, width="stretch")
 
 # --- Persist split_dims to localStorage ---
 persist({"a_split_dims": split_dims})
+
+repaint_on_page_entry("agents")

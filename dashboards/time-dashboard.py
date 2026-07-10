@@ -20,7 +20,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from dashboard_ui import PAIRED, get_date, get_list, get_str, persist, seed_widget_state
+from dashboard_ui import PAIRED, get_date, get_list, get_str, persist, repaint_on_page_entry, seed_widget_state
 from time_data import entries_from_day
 
 DEFAULT_DATA_DIR = Path(os.environ.get("TIME_DATA_DIR", Path.home() / "Performek" / "work" / "time"))
@@ -292,6 +292,8 @@ def main() -> None:
 
     # --- Persist split_dims and orientation ---
     persist({"t_split_dims": split_dims, "t_orient": orient})
+
+    repaint_on_page_entry("time")
 
 
 if __name__ == "__main__":

@@ -85,6 +85,24 @@ def seed_widget_state(key, seed):
         st.session_state[key] = seed
 
 
+def repaint_on_page_entry(page_key):
+    """Force one rerun when a page is entered, to clear a stuck loading skeleton.
+
+    Streamlit sometimes leaves its loading skeleton painted after a page's first
+    full render finishes; the same elements repaint cleanly on a rerun (what a
+    manual rerun does by hand). This is a multi-page st.navigation app, so the
+    active page is tracked in shared session_state: exactly one rerun fires per
+    entry -- including navigating back to a page -- while widget-driven reruns
+    within a page do not re-trigger it.
+
+    Call this at the END of a page, after its content has rendered: the clean
+    repaint needs the first render to already exist.
+    """
+    if st.session_state.get("_active_page") != page_key:
+        st.session_state["_active_page"] = page_key
+        st.rerun()
+
+
 def persist(spec):
     """Mirror current widget state into browser localStorage, writing only on change.
 
