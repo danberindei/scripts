@@ -164,13 +164,19 @@ def fetch_usage(cfg_dir, cache_path):
     return body
 
 
-def handle_bypass(session_id, prompt):
+def handle_bypass(session_id, prompt, tool_name="", skill_arg=""):
     """Arm/clear session bypass flags and report whether the quota check should be skipped.
 
     Returns True if the current invocation should exit 0 (allow) without checking quota.
     """
     flag_p = f"/tmp/claude-bypass-quota-p-{session_id}"
     flag_t = f"/tmp/claude-bypass-quota-t-{session_id}"
+
+    # Let the agent reach the handoff skill even when quota is red, and bypass the
+    # rest of the turn so the skill's own tool calls (reads, writing the handoff) pass.
+    if tool_name == "Skill" and skill_arg == "session-handoff":
+        _touch(flag_t)
+        return True
 
     # UserPromptSubmit: only this event carries .prompt.
     if prompt:
@@ -207,12 +213,15 @@ def main():
         data = {}
     session_id = data.get("session_id") or ""
     prompt = data.get("prompt") or ""
+    tool_name = data.get("tool_name") or ""
+    tool_input = data.get("tool_input")
+    skill_arg = tool_input.get("skill", "") if isinstance(tool_input, dict) else ""
 
     # Never block an injected prompt; checked first so it does not disturb bypass flags.
     if prompt and INJECTED_PROMPT_PATTERN.search(prompt):
         return 0
 
-    if session_id and handle_bypass(session_id, prompt):
+    if session_id and handle_bypass(session_id, prompt, tool_name, skill_arg):
         return 0
 
     cfg_dir = config_dir()
@@ -226,7 +235,7 @@ def main():
 
     red = red_windows(usage, int(time.time() * 1000))
     if red:
-        print("Quota pace is red -- stop and wait for reset.", file=sys.stderr)
+        print("Quota pace is red -- invoke the session-handoff skill now (call Skill with skill='session-handoff'), then stop.", file=sys.stderr)
         print("\n".join(red), file=sys.stderr)
         return 2
     return 0
