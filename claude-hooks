@@ -17,7 +17,9 @@ whole turn is allowed through so the handoff can actually run -- including the
 skill's own follow-up tool calls. Each check keeps its own narrower bypasses
 (see the individual functions).
 
-Exit codes: 0 = allow, 2 = block (message on stderr).
+A blocking check writes a JSON decision to stdout and exits 0; the shape depends
+on the hook event (PreToolUse denies the tool call, other events block the
+prompt). No output means allow. See emit_block.
 """
 
 import json
@@ -30,7 +32,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 CONTEXT_LIMIT = 170000
-IDLE_LIMIT = 59 * 60
+IDLE_LIMIT = 59.5 * 60
 
 HANDOFF_PROMPT_PATTERN = re.compile(
     r"session.?handoff|hand off|hand this to", re.IGNORECASE
@@ -182,56 +184,54 @@ def bypassed(state, check):
 
 
 def check_context(data, config_dir):
-    """Block when the last assistant message's context exceeds CONTEXT_LIMIT.
+    """Return a block reason when the last assistant message's context exceeds
+    CONTEXT_LIMIT, else None.
 
     The "ignore context limit" bypass is handled centrally (see arm_bypass).
     """
     transcript = data.get("transcript_path") or ""
     if not transcript:
-        return 0
+        return None
     try:
         tokens = last_assistant_usage_tokens(transcript)
     except OSError:
-        return 0
+        return None
     if tokens is not None and tokens > CONTEXT_LIMIT:
-        print(
+        return (
             f"Context at {tokens} tokens (>{CONTEXT_LIMIT}) - invoke the "
             "session-handoff skill now (call Skill with skill='session-handoff'), "
-            "then stop.",
-            file=sys.stderr,
+            "then stop."
         )
-        return 2
-    return 0
+    return None
 
 
 def check_idle(data, config_dir):
-    """Block a prompt when more than IDLE_LIMIT seconds have passed since the last
-    assistant reply. Bypass: whole-word "resume" or "continue" in the prompt.
+    """Return a block reason when more than IDLE_LIMIT seconds have passed since
+    the last assistant reply, else None. Bypass: whole-word "resume" or
+    "continue" in the prompt.
     """
     prompt = data.get("prompt") or ""
     transcript = data.get("transcript_path") or ""
 
     if IDLE_BYPASS_PATTERN.search(prompt):
-        return 0
+        return None
     if not transcript:
-        return 0
+        return None
     try:
         last_epoch = last_assistant_epoch(transcript)
     except OSError:
-        return 0
+        return None
     if last_epoch is None:
-        return 0
+        return None
 
     idle = datetime.now(timezone.utc).timestamp() - last_epoch
     if idle > IDLE_LIMIT:
         mins = int(idle // 60)
-        print(
+        return (
             f"Blocked: {mins} min since the last assistant reply (>{IDLE_LIMIT}s). "
-            f"Add 'resume' or 'continue' to the message to proceed.",
-            file=sys.stderr,
+            "Add 'resume' or 'continue' to the message to proceed."
         )
-        return 2
-    return 0
+    return None
 
 
 def parse_reset_ms(resets_at):
@@ -271,7 +271,7 @@ def check_window(label, window, now_ms, dur_ms):
     elapsed_frac = elapsed_ms / dur_ms
     if elapsed_frac <= 0:
         return None
-    expected_remaining = 2 + (1 - elapsed_frac) * 100
+    expected_remaining = (1 - elapsed_frac) * 100
     if remaining < expected_remaining * 0.5:
         wait_min = (reset_ms - now_ms) // 60000
         return f"{label}: {_round_half_up(remaining)}% left, expected {_round_half_up(expected_remaining)}% (resets in {wait_min}m)"
@@ -340,7 +340,8 @@ def fetch_usage(cfg_dir, cache_path):
 
 
 def check_quota(data, config_dir):
-    """Block tool calls when quota pace is red (remaining < half the expected line).
+    """Return a block reason when quota pace is red (remaining < half the expected
+    line), else None.
 
     The "ignore quota" / "continue in X" / "snooze for X" bypasses are handled
     centrally (see arm_bypass). Injected subagent-completion prompts are never
@@ -348,29 +349,45 @@ def check_quota(data, config_dir):
     """
     prompt = data.get("prompt") or ""
     if prompt and INJECTED_PROMPT_PATTERN.search(prompt):
-        return 0
+        return None
 
     body = fetch_usage(config_dir, cache_file(config_dir))
     if not body:
-        return 0
+        return None
     try:
         usage = json.loads(body)
     except ValueError:
-        return 0
+        return None
 
     red = red_windows(usage, int(time.time() * 1000))
     if red:
-        print(
+        return (
             "Quota pace is red -- invoke the session-handoff skill now (call Skill "
-            "with skill='session-handoff'), then stop.",
-            file=sys.stderr,
+            "with skill='session-handoff'), then stop.\n" + "\n".join(red)
         )
-        print("\n".join(red), file=sys.stderr)
-        return 2
-    return 0
+    return None
 
 
 CHECKS = {"context": check_context, "quota": check_quota, "idle": check_idle}
+
+
+def emit_block(event_name, reason):
+    """Write a JSON block decision for this hook event to stdout.
+
+    PreToolUse denies the tool call via hookSpecificOutput; every other event
+    blocks the prompt via the top-level decision field.
+    """
+    if event_name == "PreToolUse":
+        out = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+    else:
+        out = {"decision": "block", "reason": reason}
+    json.dump(out, sys.stdout)
 
 
 def main(argv):
@@ -405,15 +422,17 @@ def main(argv):
         else {"turn": [], "session": []}
     )
 
+    event_name = data.get("hook_event_name") or ""
     for name in checks:
         fn = CHECKS.get(name)
         if fn is None:
             continue
         if bypassed(state, name):
             continue
-        rc = fn(data, config_dir)
-        if rc != 0:
-            return rc
+        reason = fn(data, config_dir)
+        if reason:
+            emit_block(event_name, reason)
+            return 0
     return 0
 
 

@@ -1,4 +1,4 @@
-"""Unit tests for the quota pacing logic in claude-check-quota.
+"""Unit tests for the quota pacing logic in claude-hooks.
 
 The hook script has no .py extension, so it is loaded by path.
 Run with: uv run python -m unittest test_claude_check_quota
@@ -9,9 +9,9 @@ import os
 import unittest
 from importlib.machinery import SourceFileLoader
 
-_PATH = os.path.join(os.path.dirname(__file__), "claude-check-quota")
-_loader = SourceFileLoader("claude_check_quota", _PATH)
-_spec = importlib.util.spec_from_loader("claude_check_quota", _loader)
+_PATH = os.path.join(os.path.dirname(__file__), "claude-hooks")
+_loader = SourceFileLoader("claude_hooks", _PATH)
+_spec = importlib.util.spec_from_loader("claude_hooks", _loader)
 q = importlib.util.module_from_spec(_spec)
 _loader.exec_module(q)
 
@@ -71,14 +71,14 @@ class CheckWindowTest(unittest.TestCase):
         self.assertIsNone(q.check_window("five_hour", window(99, past), self.now_ms, FIVE_HOUR_MS))
 
     def test_on_pace_is_ok(self):
-        # elapsed_frac = 0.2 -> expected_remaining = 2 + 0.8*98 = 80.4, threshold = 40.2.
-        # remaining = 100 - 50 = 50 >= 40.2 -> not red.
+        # elapsed_frac = 0.2 -> expected_remaining = 80, threshold = 40.
+        # remaining = 100 - 50 = 50 >= 40 -> not red.
         self.assertIsNone(
             q.check_window("five_hour", window(50, self.reset_iso), self.now_ms, FIVE_HOUR_MS)
         )
 
     def test_red_when_below_half_expected(self):
-        # threshold = 40.2; utilization 70 -> remaining 30 < 40.2 -> red.
+        # threshold = 40; utilization 70 -> remaining 30 < 40 -> red.
         msg = q.check_window("five_hour", window(70, self.reset_iso), self.now_ms, FIVE_HOUR_MS)
         self.assertIsNotNone(msg)
         self.assertIn("five_hour", msg)
@@ -86,8 +86,8 @@ class CheckWindowTest(unittest.TestCase):
         self.assertIn("expected 80%", msg)
 
     def test_boundary_equal_threshold_is_ok(self):
-        # remaining exactly == threshold (40.2) is not red (strict <).
-        msg = q.check_window("five_hour", window(59.8, self.reset_iso), self.now_ms, FIVE_HOUR_MS)
+        # remaining exactly == threshold (40) is not red (strict <).
+        msg = q.check_window("five_hour", window(60, self.reset_iso), self.now_ms, FIVE_HOUR_MS)
         self.assertIsNone(msg)
 
 
@@ -104,21 +104,23 @@ class RedWindowsTest(unittest.TestCase):
         self.assertIn("five_hour", msgs[0])
 
 
-class TemporaryPatternTest(unittest.TestCase):
-    def test_matches_session_handoff(self):
-        self.assertIsNotNone(q.TEMPORARY_PATTERN.search("please do a session handoff"))
-
-    def test_matches_hand_off(self):
-        self.assertIsNotNone(q.TEMPORARY_PATTERN.search("hand off to another agent"))
-
-    def test_matches_wrap_up(self):
-        self.assertIsNotNone(q.TEMPORARY_PATTERN.search("let's wrap up"))
+class QuotaTemporaryPatternTest(unittest.TestCase):
+    def test_matches_continue(self):
+        self.assertIsNotNone(q.QUOTA_TEMPORARY_PATTERN.search("continue in 30"))
 
     def test_matches_snooze(self):
-        self.assertIsNotNone(q.TEMPORARY_PATTERN.search("snooze for 1.5h"))
+        self.assertIsNotNone(q.QUOTA_TEMPORARY_PATTERN.search("snooze for 1.5h"))
 
     def test_no_match_unrelated(self):
-        self.assertIsNone(q.TEMPORARY_PATTERN.search("what's the weather today"))
+        self.assertIsNone(q.QUOTA_TEMPORARY_PATTERN.search("what's the weather today"))
+
+
+class HandoffPromptPatternTest(unittest.TestCase):
+    def test_matches_session_handoff(self):
+        self.assertIsNotNone(q.HANDOFF_PROMPT_PATTERN.search("please do a session handoff"))
+
+    def test_matches_hand_off(self):
+        self.assertIsNotNone(q.HANDOFF_PROMPT_PATTERN.search("hand off to another agent"))
 
 
 class InjectedPromptPatternTest(unittest.TestCase):
