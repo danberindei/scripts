@@ -19,6 +19,7 @@ from time_data import (
     layout_week,
     load_days,
     load_sprints,
+    load_workstreams,
     slug_of,
     sprint_for_date,
     week_of,
@@ -362,6 +363,38 @@ def test_entries_from_day_new_format_joins_task_metadata():
     assert result[1]["task_name"] == "standup"
 
 
+def test_entries_from_day_new_format_seconds_converted_to_minutes():
+    day = {
+        "date": "2026-07-21",
+        "tasks": [{"name": "t", "kind": "work", "ticket": "ENG-1", "worklog_comment": None}],
+        "segments": [
+            {"task_name": "t", "start": "09:00:00", "end": "09:01:30", "seconds": 90, "note": "a"},
+            {"task_name": "t", "start": "09:02:00", "end": "09:02:30", "seconds": 30, "note": "b"},
+        ],
+    }
+    result = entries_from_day(day)
+    assert result[0]["minutes"] == 1.5
+    assert result[1]["minutes"] == 0.5
+
+
+def test_entries_from_day_new_format_explicit_minutes_wins_over_seconds():
+    day = {
+        "tasks": [],
+        "segments": [{"task_name": "x", "start": "10:00", "end": "10:07", "minutes": 7, "seconds": 999, "note": "n"}],
+    }
+    result = entries_from_day(day)
+    assert result[0]["minutes"] == 7
+
+
+def test_entries_from_day_new_format_missing_duration_is_zero():
+    day = {
+        "tasks": [],
+        "segments": [{"task_name": "x", "start": "10:00", "end": "10:00", "note": "n"}],
+    }
+    result = entries_from_day(day)
+    assert result[0]["minutes"] == 0
+
+
 def test_entries_from_day_new_format_unknown_task_defaults_work():
     day = {
         "tasks": [],
@@ -429,16 +462,17 @@ def test_load_days_empty_dir_returns_empty(tmp_path):
 # --- load_sprints ---
 
 def test_load_sprints_merges_subjects(tmp_path):
-    sprints_dir = tmp_path / "2026" / "sprints"
-    sprints_dir.mkdir(parents=True)
-    (sprints_dir / "2026-06-08_2026-06-22_ENG_Sprint_210.json").write_text(
-        '{"id":1,"name":"S1","start":"2026-06-08","end":"2026-06-22","state":"closed",'
-        '"meeting_ticket":"ENG-100","tickets":{"ENG-1":"Foo"}}'
-    )
-    (sprints_dir / "2026-06-22_2026-07-06_ENG_Sprint_211.json").write_text(
-        '{"id":2,"name":"S2","start":"2026-06-22","end":"2026-07-06","state":"active",'
-        '"meeting_ticket":"ENG-200","tickets":{"ENG-2":"Bar"}}'
-    )
+    year = tmp_path / "2026"
+    year.mkdir()
+    (year / "sprints.json").write_text(json.dumps({
+        "year": 2026,
+        "sprints": [
+            {"id": 1, "name": "S1", "start": "2026-06-08", "end": "2026-06-22",
+             "state": "closed", "meeting_ticket": "ENG-100", "tickets": {"ENG-1": "Foo"}},
+            {"id": 2, "name": "S2", "start": "2026-06-22", "end": "2026-07-06",
+             "state": "active", "meeting_ticket": "ENG-200", "tickets": {"ENG-2": "Bar"}},
+        ],
+    }))
     result = load_sprints(tmp_path)
     assert result["has_sprint_data"] is True
     assert result["subjects"]["ENG-1"] == "Foo"
@@ -447,13 +481,16 @@ def test_load_sprints_merges_subjects(tmp_path):
 
 
 def test_load_sprints_merges_across_years(tmp_path):
-    for year, sprint_id, ticket in [("2025", "ENG-10", "ENG-10"), ("2026", "ENG-20", "ENG-20")]:
-        d = tmp_path / year / "sprints"
-        d.mkdir(parents=True)
-        (d / f"{year}-06-01_{year}-06-15_Sprint.json").write_text(
-            f'{{"id":"{sprint_id}","name":"S","start":"{year}-06-01","end":"{year}-06-15",'
-            f'"state":"closed","tickets":{{"{ticket}":"Summary"}}}}'
-        )
+    for year, ticket in [("2025", "ENG-10"), ("2026", "ENG-20")]:
+        d = tmp_path / year
+        d.mkdir()
+        (d / "sprints.json").write_text(json.dumps({
+            "year": int(year),
+            "sprints": [
+                {"id": ticket, "name": "S", "start": f"{year}-06-01", "end": f"{year}-06-15",
+                 "state": "closed", "tickets": {ticket: "Summary"}},
+            ],
+        }))
     result = load_sprints(tmp_path)
     assert result["has_sprint_data"] is True
     assert "ENG-10" in result["subjects"]
@@ -461,8 +498,67 @@ def test_load_sprints_merges_across_years(tmp_path):
     assert len(result["sprints"]) == 2
 
 
+def test_load_sprints_skips_synthetic_no_sprint(tmp_path):
+    year = tmp_path / "2026"
+    year.mkdir()
+    (year / "sprints.json").write_text(json.dumps({
+        "year": 2026,
+        "sprints": [
+            {"id": 1, "name": "S1", "start": "2026-06-08", "end": "2026-06-22",
+             "state": "closed", "tickets": {"ENG-1": "Foo"}},
+            {"id": "no-sprint", "name": "no-sprint", "start": None, "end": None,
+             "state": "synthetic", "tickets": {}},
+        ],
+    }))
+    result = load_sprints(tmp_path)
+    assert len(result["sprints"]) == 1
+    assert result["sprints"][0]["id"] == 1
+
+
 def test_load_sprints_no_dir_returns_empty(tmp_path):
     result = load_sprints(tmp_path)
     assert result["has_sprint_data"] is False
     assert result["subjects"] == {}
     assert result["sprints"] == []
+
+
+# --- load_workstreams ---
+
+def test_load_workstreams_maps_tickets_to_label(tmp_path):
+    year = tmp_path / "2026"
+    year.mkdir()
+    (year / "workstreams.json").write_text(json.dumps({"workstreams": [
+        {"id": "eng-1", "label": "Bot DQ (ENG-1)", "tickets": ["ENG-1", "ENG-2"]},
+        {"id": "eng-3", "label": "Sync bugs", "tickets": ["ENG-3"]},
+    ]}))
+    labels = load_workstreams(tmp_path)
+    assert labels["ENG-1"] == "Bot DQ (ENG-1)"
+    assert labels["ENG-2"] == "Bot DQ (ENG-1)"
+    assert labels["ENG-3"] == "Sync bugs"
+
+
+def test_load_workstreams_joins_distinct_labels_for_shared_ticket(tmp_path):
+    year = tmp_path / "2026"
+    year.mkdir()
+    (year / "workstreams.json").write_text(json.dumps({"workstreams": [
+        {"id": "a", "label": "Alpha", "tickets": ["ENG-1"]},
+        {"id": "b", "label": "Beta", "tickets": ["ENG-1"]},
+        {"id": "c", "label": "Alpha", "tickets": ["ENG-1"]},
+    ]}))
+    labels = load_workstreams(tmp_path)
+    # Distinct labels join; a repeated label is not appended twice.
+    assert labels["ENG-1"] == "Alpha / Beta"
+
+
+def test_load_workstreams_skips_empty_label_and_ticketless(tmp_path):
+    year = tmp_path / "2026"
+    year.mkdir()
+    (year / "workstreams.json").write_text(json.dumps({"workstreams": [
+        {"id": "a", "label": "", "tickets": ["ENG-1"]},
+        {"id": "b", "label": "Beta", "tickets": []},
+    ]}))
+    assert load_workstreams(tmp_path) == {}
+
+
+def test_load_workstreams_no_file_returns_empty(tmp_path):
+    assert load_workstreams(tmp_path) == {}

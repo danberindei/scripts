@@ -32,10 +32,14 @@ def entries_from_day(day: dict) -> list:
     comment, start, end, minutes directly.
 
     New format: day has "tasks" (list of {name, kind, ticket, worklog_comment})
-    and "segments" (list of {task_name, start, end, minutes, note}).  Each
+    and "segments" (list of {task_name, start, end, seconds, note}).  Each
     segment is joined to its task to produce an old-style entry, with "comment"
     filled from the segment's "note" field, plus an extra "task_name" field that
     slug_of uses to merge ticketless segments of the same task into one block.
+
+    Segment duration is carried as "seconds" in current files and converted to
+    fractional minutes here; an explicit "minutes" field (older intermediate
+    files) is honored when present.
     """
     if "segments" in day and "tasks" in day:
         task_map = {t["name"]: t for t in day.get("tasks", [])}
@@ -45,7 +49,7 @@ def entries_from_day(day: dict) -> list:
             entries.append({
                 "start": seg.get("start", ""),
                 "end": seg.get("end", ""),
-                "minutes": seg.get("minutes") or 0,
+                "minutes": _segment_minutes(seg),
                 "kind": task.get("kind", "work"),
                 "ticket": task.get("ticket"),
                 "task_name": seg.get("task_name", ""),
@@ -53,6 +57,17 @@ def entries_from_day(day: dict) -> list:
             })
         return entries
     return day.get("entries", [])
+
+
+def _segment_minutes(seg: dict) -> float:
+    """Return a segment's duration in minutes.
+
+    Prefers an explicit "minutes" field (older intermediate files); otherwise
+    converts the "seconds" field used by current files to fractional minutes.
+    """
+    if seg.get("minutes") is not None:
+        return seg["minutes"]
+    return (seg.get("seconds") or 0) / 60.0
 
 
 def load_days(data_dir: Path) -> list:
@@ -80,24 +95,25 @@ def load_days(data_dir: Path) -> list:
 
 
 def load_sprints(data_dir: Path) -> dict:
-    """Load sprint files from data_dir/YYYY/sprints/*.json across all year dirs.
+    """Load sprint data from data_dir/YYYY/sprints.json across all year dirs.
+
+    Each yearly file has a top-level "sprints" list of sprint dicts. The
+    synthetic "no-sprint" entry (no start date) is skipped.
 
     Returns a dict with:
         sprints         - list of sprint dicts sorted by start date
-        subjects        - merged {ticket_key -> summary} map across all sprint files
-        has_sprint_data - True if any sprint files were found
+        subjects        - merged {ticket_key -> summary} map across all files
+        has_sprint_data - True if any real sprints were found
     """
     sprints = []
     subjects = {}
-    for sprint_dir in sorted(data_dir.glob("*/sprints")):
-        if not sprint_dir.is_dir():
+    for f in sorted(data_dir.glob("*/sprints.json")):
+        try:
+            data = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
             continue
-        for f in sorted(sprint_dir.glob("*.json")):
-            if f.name == "no-sprint.json":
-                continue
-            try:
-                sprint = json.loads(f.read_text())
-            except (json.JSONDecodeError, OSError):
+        for sprint in data.get("sprints", []):
+            if not isinstance(sprint, dict) or not sprint.get("start"):
                 continue
             sprints.append(sprint)
             subjects.update(sprint.get("tickets", {}))
@@ -107,6 +123,33 @@ def load_sprints(data_dir: Path) -> dict:
         "subjects": subjects,
         "has_sprint_data": bool(sprints),
     }
+
+
+def load_workstreams(data_dir: Path) -> dict:
+    """Load workstream files from data_dir/YYYY/workstreams.json across all year dirs.
+
+    Returns a dict {ticket_key -> label}. A ticket listed in more than one
+    workstream maps to its distinct labels joined with " / ".  Workstreams with
+    no label or no tickets contribute nothing.
+    """
+    labels = {}
+    for f in sorted(data_dir.glob("*/workstreams.json")):
+        try:
+            data = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        for ws in data.get("workstreams", []):
+            label = ws.get("label")
+            if not label:
+                continue
+            for ticket in ws.get("tickets", []):
+                existing = labels.get(ticket)
+                if existing:
+                    if label not in existing.split(" / "):
+                        labels[ticket] = existing + " / " + label
+                else:
+                    labels[ticket] = label
+    return labels
 
 
 def sprints_for_date(d: date, sprints: list) -> list:

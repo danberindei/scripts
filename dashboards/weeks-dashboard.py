@@ -30,6 +30,7 @@ from time_data import (
     layout_week,
     load_days,
     load_sprints,
+    load_workstreams,
     slug_of,
     sprint_for_date,
     sprints_for_date,
@@ -148,6 +149,7 @@ def _build_week_html(
     max_bar_height_px: float,
     display_mode: str = "proportional",
     day_totals: dict = None,
+    workstreams: dict = None,
 ) -> tuple:
     """Build HTML string and required iframe height for one week section.
 
@@ -155,6 +157,7 @@ def _build_week_html(
     layout: {date: [block_dict, ...]} from layout_week().
     colors: {slug: hex_color} from color_map().
     subjects: {ticket_key: summary} from sprint data.
+    workstreams: {ticket_key: label} from workstream data, shown in tooltips.
     max_bar_height_px: the shared vertical scale for this render.
 
     Returns (html_str, iframe_height_px).
@@ -206,10 +209,12 @@ def _build_week_html(
                     "decision": e.get("decision") or "",
                 })
             subject = subjects.get(slug, "")
+            workstream = (workstreams or {}).get(slug, "")
             tip_data = {
                 "slug": slug,
                 "subject": subject,
-                "total": mins_str,
+                "workstream": workstream,
+                "total_min": block["minutes"],
                 "entries": entry_list,
             }
             tip_attr = html.escape(json.dumps(tip_data), quote=True)
@@ -276,6 +281,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
 .detail-close {{ position: absolute; top: 10px; right: 10px; cursor: pointer; font-weight: bold; font-size: 18px; color: #999; }}
 .detail-header h2 {{ margin: 0 0 5px 0; font-size: 16px; }}
 .detail-slug {{ font-size: 11px; color: #777; margin-bottom: 10px; }}
+.detail-workstream {{ font-size: 11px; color: #b8860b; margin-top: -6px; margin-bottom: 10px; }}
 .detail-total {{ font-weight: 600; margin-bottom: 15px; font-size: 13px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
 .entry-row {{ display: flex; gap: 10px; font-size: 12px; margin-bottom: 4px; }}
 .entry-time {{ color: #666; min-width: 80px; }}
@@ -290,6 +296,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
 #wk-tooltip .entry-line {{ color: #a6adc8; font-size: 10px; }}
 #wk-tooltip .decision-line {{ color: #7f849c; font-size: 10px; padding-left: 10px; }}
 #wk-tooltip .subject-line {{ color: #a6e3a1; font-size: 10px; }}
+#wk-tooltip .workstream-line {{ color: #f9e2af; font-size: 10px; }}
 #wk-tooltip .missing-line {{ color: #f38ba8; font-size: 10px; font-style: italic; }}
 </style>
 </head>
@@ -308,16 +315,24 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }}
 
-  function fmtMin(m) {{
-    var h = Math.floor(m / 60), mn = m % 60;
-    return h + ':' + (mn < 10 ? '0' : '') + mn;
+  function fmtDur(m) {{
+    var s = Math.round((Number(m) || 0) * 60);
+    var h = Math.floor(s / 3600), mn = Math.floor((s % 3600) / 60), sec = s % 60;
+    var out = '';
+    if (h) out += h + 'h';
+    if (mn || h) out += mn + 'm';
+    return out + sec + 's';
   }}
 
   function buildTip(d) {{
     var subject = d.subject ? esc(d.subject) : null;
     var slug = esc(d.slug);
     var header = subject ? '<b>' + subject + '</b> (' + slug + ')' : '<b>' + slug + '</b>';
-    return header + ' &middot; ' + esc(d.total);
+    var tip = header + ' &middot; ' + fmtDur(d.total_min);
+    if (d.workstream) {{
+      tip += '<div class="workstream-line">' + esc(d.workstream) + '</div>';
+    }}
+    return tip;
   }}
 
   function buildDetail(d) {{
@@ -325,13 +340,16 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
     var slug = esc(d.slug);
     var title = subject || slug;
     var subtitle = subject ? '<div class="detail-slug">' + slug + '</div>' : '';
+    if (d.workstream) {{
+      subtitle += '<div class="detail-workstream">' + esc(d.workstream) + '</div>';
+    }}
     var rows = '';
     for (var i = 0; i < d.entries.length; i++) {{
       var e = d.entries[i];
       var range = e.start && e.end ? esc(e.start) + '-' + esc(e.end) : '';
       rows += '<div class="entry-row">'
         + '<span class="entry-time">' + range + '</span>'
-        + '<span class="entry-duration">' + fmtMin(e.minutes) + '</span>'
+        + '<span class="entry-duration">' + fmtDur(e.minutes) + '</span>'
         + '<span class="entry-comment">' + esc(e.comment) + '</span>'
         + '</div>';
       if (e.decision) {{
@@ -341,7 +359,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
     return '<div class="detail-card">'
       + '<span class="detail-close" id="wk-detail-close">&times;</span>'
       + '<div class="detail-header"><h2>' + esc(title) + '</h2>' + subtitle + '</div>'
-      + '<div class="detail-total">Total: ' + esc(d.total) + '</div>'
+      + '<div class="detail-total">Total: ' + fmtDur(d.total_min) + '</div>'
       + rows
       + '</div>';
   }}
@@ -437,6 +455,7 @@ def main():
         st.stop()
 
     sprint_data = load_sprints(DEFAULT_DATA_DIR)
+    workstreams = load_workstreams(DEFAULT_DATA_DIR)
     if not sprint_data["has_sprint_data"]:
         st.caption(
             "Sprint data has not been backfilled yet. "
@@ -643,6 +662,7 @@ def main():
             max_bar_height_px,
             display_mode,
             day_totals=day_totals,
+            workstreams=workstreams,
         )
         components.html(week_html, height=iframe_height, scrolling=False)
 
