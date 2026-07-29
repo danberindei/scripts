@@ -15,6 +15,12 @@ _spec = importlib.util.spec_from_loader("claude_hooks", _loader)
 q = importlib.util.module_from_spec(_spec)
 _loader.exec_module(q)
 
+_CODEX_PATH = os.path.join(os.path.dirname(__file__), "codex-hooks")
+_codex_loader = SourceFileLoader("codex_hooks", _CODEX_PATH)
+_codex_spec = importlib.util.spec_from_loader("codex_hooks", _codex_loader)
+c = importlib.util.module_from_spec(_codex_spec)
+_codex_loader.exec_module(c)
+
 HOUR_MS = 60 * 60 * 1000
 FIVE_HOUR_MS = 5 * HOUR_MS
 
@@ -116,11 +122,29 @@ class QuotaTemporaryPatternTest(unittest.TestCase):
 
 
 class HandoffPromptPatternTest(unittest.TestCase):
-    def test_matches_session_handoff(self):
-        self.assertIsNotNone(q.HANDOFF_PROMPT_PATTERN.search("please do a session handoff"))
+    def test_matches_session_handoff_anywhere(self):
+        self.assertIsNotNone(q.HANDOFF_PROMPT_PATTERN.search("/session-handoff"))
+        self.assertIsNotNone(q.HANDOFF_PROMPT_PATTERN.search("session-handoff"))
+        self.assertIsNotNone(
+            q.HANDOFF_PROMPT_PATTERN.search("wrap up:\nsession-handoff\nkeep it short")
+        )
 
-    def test_matches_hand_off(self):
-        self.assertIsNotNone(q.HANDOFF_PROMPT_PATTERN.search("hand off to another agent"))
+    def test_does_not_match_handoff_prose(self):
+        self.assertIsNone(q.HANDOFF_PROMPT_PATTERN.search("please do a session handoff"))
+        self.assertIsNone(q.HANDOFF_PROMPT_PATTERN.search("hand off to another agent"))
+
+
+class CodexHandoffPromptPatternTest(unittest.TestCase):
+    def test_matches_session_handoff_anywhere(self):
+        self.assertIsNotNone(c.HANDOFF_PROMPT_PATTERN.search("/session-handoff"))
+        self.assertIsNotNone(c.HANDOFF_PROMPT_PATTERN.search("session-handoff"))
+        self.assertIsNotNone(
+            c.HANDOFF_PROMPT_PATTERN.search("wrap up:\nsession-handoff\nkeep it short")
+        )
+
+    def test_does_not_match_handoff_prose(self):
+        self.assertIsNone(c.HANDOFF_PROMPT_PATTERN.search("please do a session handoff"))
+        self.assertIsNone(c.HANDOFF_PROMPT_PATTERN.search("hand off to another agent"))
 
 
 class InjectedPromptPatternTest(unittest.TestCase):

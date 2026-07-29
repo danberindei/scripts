@@ -22,9 +22,7 @@ from datetime import datetime, timezone
 CONTEXT_LIMIT = 170000
 IDLE_LIMIT = 59.5 * 60
 
-HANDOFF_PROMPT_PATTERN = re.compile(
-    r"session.?handoff|hand off|hand this to", re.IGNORECASE
-)
+HANDOFF_PROMPT_PATTERN = re.compile(r"session-handoff", re.IGNORECASE)
 CONTEXT_BYPASS_PATTERN = re.compile(r"ignore context limit", re.IGNORECASE)
 QUOTA_PERSISTENT_PATTERN = re.compile(r"ignore quota", re.IGNORECASE)
 QUOTA_TEMPORARY_PATTERN = re.compile(
