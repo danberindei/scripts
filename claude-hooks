@@ -6,7 +6,7 @@ argv, in order, and blocks (exit 2) on the first that fails.
 
 Usage:
     claude-hooks [--config DIR] CHECK [CHECK ...]
-    CHECK is one of: context, quota, idle
+    CHECK is one of: context, quota, idle, rgflags
 
 stdin is the hook JSON payload. --config DIR sets the config dir for the quota
 check (default: $CLAUDE_CONFIG_DIR or ~/.claude); other checks ignore it.
@@ -24,6 +24,7 @@ prompt). No output means allow. See emit_block.
 import json
 import os
 import re
+import shlex
 import sys
 import time
 import urllib.error
@@ -167,8 +168,14 @@ def arm_bypass(session_id, prompt, tool_name, skill_arg):
     return state
 
 
+# Checks that no bypass may unblock: a wrong flag is wrong during a handoff too.
+NEVER_BYPASSED = {"rgflags"}
+
+
 def bypassed(state, check):
     """True if this check is bypassed by the current state."""
+    if check in NEVER_BYPASSED:
+        return False
     return "all" in state["turn"] or check in state["turn"] or check in state["session"]
 
 
@@ -220,6 +227,71 @@ def check_idle(data, config_dir):
             f"Blocked: {mins} min since the last assistant reply (>{IDLE_LIMIT}s). "
             "Add 'resume' or 'continue' to the message to proceed."
         )
+    return None
+
+
+SHELL_OPERATORS = {"|", "||", "&&", ";", "&", "(", ")", "<", ">", ">>", "<<"}
+# rg short flags whose value may itself start with a dash.
+RG_VALUE_FLAGS = {"-e", "-f", "-g", "--regexp", "--file", "--glob", "--iglob"}
+RG_SHORT_R = re.compile(r"^-[A-Za-z]*r[A-Za-z]*$")
+
+
+def rg_arg_spans(tokens):
+    """Yield the argument tokens of each rg invocation in a shell token stream."""
+    args = None
+    for token in tokens:
+        if args is None:
+            if token == "rg" or token.endswith("/rg"):
+                args = []
+            continue
+        if token in SHELL_OPERATORS:
+            yield args
+            args = None
+            continue
+        args.append(token)
+    if args is not None:
+        yield args
+
+
+def check_rgflags(data, config_dir):
+    """Return a block reason when a Bash command passes short -r to rg, else None.
+
+    rg's -r is --replace=TEXT: `rg -rn PATTERN` prints the literal "n" for every
+    match rather than numbering lines. r is rg's only short flag containing "r",
+    so any short cluster containing it is a replace. --replace=TEXT is allowed.
+    """
+    if (data.get("tool_name") or "") != "Bash":
+        return None
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+    if "rg" not in command:
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+
+    for args in rg_arg_spans(tokens):
+        skip = False
+        for token in args:
+            if skip:
+                skip = False
+                continue
+            if token == "--":
+                break
+            if token in RG_VALUE_FLAGS:
+                skip = True
+                continue
+            if RG_SHORT_R.match(token):
+                return (
+                    f"Blocked: `rg {token}` -- rg's -r is --replace=TEXT, not "
+                    "recursive, so this prints a replacement instead of matching "
+                    "lines. rg already searches recursively; use `rg -n PATTERN "
+                    "PATH` for line numbers. For a real replacement write "
+                    "--replace=TEXT."
+                )
     return None
 
 
@@ -357,7 +429,12 @@ def check_quota(data, config_dir):
     return None
 
 
-CHECKS = {"context": check_context, "quota": check_quota, "idle": check_idle}
+CHECKS = {
+    "context": check_context,
+    "quota": check_quota,
+    "idle": check_idle,
+    "rgflags": check_rgflags,
+}
 
 
 def emit_block(event_name, reason):

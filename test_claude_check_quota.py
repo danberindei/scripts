@@ -147,6 +147,87 @@ class CodexHandoffPromptPatternTest(unittest.TestCase):
         self.assertIsNone(c.HANDOFF_PROMPT_PATTERN.search("hand off to another agent"))
 
 
+def bash(command):
+    return {"tool_name": "Bash", "tool_input": {"command": command}}
+
+
+class CheckRgFlagsTest(unittest.TestCase):
+    def blocked(self, command):
+        return q.check_rgflags(bash(command), "")
+
+    def test_blocks_short_r_clusters(self):
+        for command in (
+            'rg -rn "api.retellai.com|/v2/" --glob \'!node_modules\'',
+            "rg -r pattern",
+            "rg -nr pattern",
+            "rg -rin pattern",
+            "rg -rl pattern",
+            "/usr/bin/rg -rn foo",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.blocked(command))
+
+    def test_allows_correct_invocations(self):
+        for command in (
+            "rg -n pattern .",
+            "rg pattern",
+            "rg --replace=X pattern",
+            "cd /tmp && rg -n --glob '!node_modules' pattern",
+            "rg --help | rg -n replace",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self.blocked(command))
+
+    def test_finds_rg_after_an_unspaced_pipe(self):
+        self.assertIsNotNone(self.blocked("git log|rg -rn foo"))
+
+    def test_quoted_pattern_containing_pipe_stays_one_token(self):
+        self.assertIsNone(self.blocked('rg -n "a|b" .'))
+
+    def test_ignores_dash_r_as_a_flag_value_or_after_end_of_flags(self):
+        self.assertIsNone(self.blocked('rg -e "-rn" .'))
+        self.assertIsNone(self.blocked('rg -g "-rn" .'))
+        self.assertIsNone(self.blocked("rg -- -rn ."))
+
+    def test_ignores_non_bash_tools(self):
+        self.assertIsNone(q.check_rgflags({"tool_name": "Read", "tool_input": {}}, ""))
+
+    def test_unbalanced_quotes_allow_rather_than_block(self):
+        self.assertIsNone(self.blocked('rg -n "unterminated'))
+
+    def test_not_bypassable(self):
+        self.assertFalse(q.bypassed({"turn": ["all"], "session": ["quota"]}, "rgflags"))
+        self.assertTrue(q.bypassed({"turn": ["all"], "session": []}, "quota"))
+
+
+class CodexCheckRgFlagsTest(unittest.TestCase):
+    def test_blocks_short_r_clusters_in_exec_command_cmd(self):
+        for command in (
+            'rg -rl "update_crm" /home/dan/Performek/crm',
+            'rg -rn "console.time|Date.now" app.js',
+            'rg -r "retell-dev" /home/dan/Performek/voice',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(c.check_rgflags({"tool_input": {"cmd": command}}))
+
+    def test_blocks_short_r_cluster_in_shell_argv_list(self):
+        payload = {"tool_input": {"command": ["bash", "-lc", "rg -rn foo ."]}}
+        self.assertIsNotNone(c.check_rgflags(payload))
+
+    def test_allows_correct_invocations(self):
+        self.assertIsNone(c.check_rgflags({"tool_input": {"cmd": "rg -n foo ."}}))
+        self.assertIsNone(
+            c.check_rgflags({"tool_input": {"command": ["bash", "-lc", "rg -n foo ."]}})
+        )
+
+    def test_ignores_tool_input_without_a_command(self):
+        self.assertIsNone(c.check_rgflags({"tool_input": {"plan": [{"step": "rg -rn"}]}}))
+        self.assertIsNone(c.check_rgflags({}))
+
+    def test_not_bypassable(self):
+        self.assertFalse(c.bypassed({"turn": ["all"], "session": []}, "rgflags"))
+
+
 class InjectedPromptPatternTest(unittest.TestCase):
     def test_matches_task_notification(self):
         self.assertIsNotNone(
