@@ -20,7 +20,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-CONTEXT_LIMIT = 170000
+CONTEXT_LIMIT = 190000
 IDLE_LIMIT = 59.5 * 60
 
 HANDOFF_PROMPT_PATTERN = re.compile(r"session-handoff", re.IGNORECASE)
