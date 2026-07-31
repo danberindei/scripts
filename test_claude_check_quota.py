@@ -228,6 +228,55 @@ class CodexCheckRgFlagsTest(unittest.TestCase):
         self.assertFalse(c.bypassed({"turn": ["all"], "session": []}, "rgflags"))
 
 
+class HandoffToolBypassTest(unittest.TestCase):
+    def arm(self, prompt="", tool_name="", skill_arg=""):
+        path = q._bypass_path("handoff-tool-test")
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return q.arm_bypass("handoff-tool-test", prompt, tool_name, skill_arg)
+
+    def test_handoff_skill_call_arms_the_bypass(self):
+        state = self.arm(tool_name="Skill", skill_arg="session-handoff")
+        self.assertIn("handoff", state["turn"])
+        for tool_name in ("Write", "Edit"):
+            with self.subTest(tool_name=tool_name):
+                self.assertTrue(q.handoff_tool_allowed(state, "PreToolUse", tool_name))
+
+    def test_another_skill_does_not_arm_it(self):
+        state = self.arm(tool_name="Skill", skill_arg="commit")
+        self.assertNotIn("handoff", state["turn"])
+        self.assertFalse(q.handoff_tool_allowed(state, "PreToolUse", "Write"))
+
+    def test_arming_is_idempotent(self):
+        self.arm(tool_name="Skill", skill_arg="session-handoff")
+        state = q.arm_bypass("handoff-tool-test", "", "Skill", "session-handoff")
+        self.assertEqual(["handoff"], state["turn"])
+
+    def test_a_new_prompt_disarms_it(self):
+        self.arm(tool_name="Skill", skill_arg="session-handoff")
+        state = q.arm_bypass("handoff-tool-test", "now do the next thing", "", "")
+        self.assertNotIn("handoff", state["turn"])
+
+    def test_it_covers_no_other_tool(self):
+        state = {"turn": ["handoff"], "session": []}
+        for tool_name in ("Bash", "Read", "NotebookEdit", "Task"):
+            with self.subTest(tool_name=tool_name):
+                self.assertFalse(q.handoff_tool_allowed(state, "PreToolUse", tool_name))
+
+    def test_it_covers_pretooluse_only(self):
+        state = {"turn": ["handoff"], "session": []}
+        self.assertFalse(q.handoff_tool_allowed(state, "UserPromptSubmit", "Write"))
+
+    def test_it_does_not_widen_the_check_bypasses(self):
+        state = {"turn": ["handoff"], "session": []}
+        for check in ("context", "quota", "idle", "rgflags"):
+            with self.subTest(check=check):
+                self.assertFalse(q.bypassed(state, check))
+
+
 class InjectedPromptPatternTest(unittest.TestCase):
     def test_matches_task_notification(self):
         self.assertIsNotNone(
@@ -243,6 +292,151 @@ class InjectedPromptPatternTest(unittest.TestCase):
 
     def test_no_match_ordinary_prompt(self):
         self.assertIsNone(q.INJECTED_PROMPT_PATTERN.search("please fix the bug in the parser"))
+
+
+SKILL = "/home/dan/.agents/skills/session-handoff/SKILL.md"
+
+
+class CodexHandoffCallTest(unittest.TestCase):
+    def test_it_covers_apply_patch(self):
+        self.assertTrue(c.handoff_call("PreToolUse", "apply_patch", ""))
+
+    def test_it_covers_no_other_tool(self):
+        for tool_name in ("write_stdin", "exec", "update_plan", "wait"):
+            with self.subTest(tool_name=tool_name):
+                self.assertFalse(c.handoff_call("PreToolUse", tool_name, f"cat {SKILL}"))
+
+    def test_it_covers_pretooluse_only(self):
+        for event_name in ("UserPromptSubmit", ""):
+            with self.subTest(event_name=event_name):
+                self.assertFalse(c.handoff_call(event_name, "apply_patch", ""))
+                self.assertFalse(c.handoff_call(event_name, "exec_command", f"cat {SKILL}"))
+
+    def test_the_reason_pattern_gates_it(self):
+        idle = "Blocked: 75 min since the last agent reply (>3570s)."
+        self.assertIsNone(c.HANDOFF_REASON_PATTERN.search(idle))
+
+
+class CodexSkillReadCommandTest(unittest.TestCase):
+    def test_it_allows_the_readers_codex_uses(self):
+        for command in (
+            f"cat {SKILL}",
+            f"cat -n {SKILL}",
+            f"/usr/bin/cat {SKILL}",
+            f"sed -n '1,200p' {SKILL}",
+            f"sed -n 40p {SKILL}",
+            f"head -n 50 {SKILL}",
+            f"tail -20 {SKILL}",
+            f"wc -l {SKILL}",
+            "cat ../.agents/skills/session-handoff/SKILL.md",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(c.skill_read_command(command))
+
+    def test_it_rejects_another_path(self):
+        for command in (
+            "cat /etc/passwd",
+            "cat /home/dan/.agents/skills/commit/SKILL.md",
+            f"cat {SKILL} /etc/passwd",
+            "cat /home/dan/.agents/skills/session-handoff/reference.md",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(c.skill_read_command(command))
+
+    def test_it_rejects_a_second_command(self):
+        for command in (
+            f"cat {SKILL}; rm -rf /tmp/x",
+            f"cat {SKILL} && git push",
+            f"cat {SKILL} | tee /tmp/x",
+            f"cat {SKILL} > /tmp/x",
+            f"cat {SKILL}\nrm -rf /tmp/x",
+            f"cat `whoami` {SKILL}",
+            f"cat $(echo {SKILL})",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(c.skill_read_command(command))
+
+    def test_it_rejects_a_sed_script_that_can_write(self):
+        for command in (
+            f"sed -i 's/a/b/' {SKILL}",
+            f"sed -n '1,2w /tmp/x' {SKILL}",
+            f"sed -n -f /tmp/script {SKILL}",
+            f"sed '1,2d' {SKILL}",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(c.skill_read_command(command))
+
+    def test_it_rejects_a_writer_and_an_arbitrary_command(self):
+        for command in (
+            f"tee {SKILL}",
+            f"vim {SKILL}",
+            f"python3 -c 'print(1)' {SKILL}",
+            f"rg -n secret {SKILL}",
+            "",
+            "cat",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(c.skill_read_command(command))
+
+    def test_it_is_reachable_only_through_a_shell_tool(self):
+        command = f"cat {SKILL}"
+        for tool_name in ("exec_command", "shell", "shell_command"):
+            with self.subTest(tool_name=tool_name):
+                self.assertTrue(c.handoff_call("PreToolUse", tool_name, command))
+        self.assertFalse(c.handoff_call("PreToolUse", "exec", command))
+
+
+class CodexHandoffReasonPatternTest(unittest.TestCase):
+    def transcript(self, entries):
+        import json as _json
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        with os.fdopen(fd, "w") as f:
+            for entry in entries:
+                f.write(_json.dumps(entry) + "\n")
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_it_matches_the_context_reason(self):
+        path = self.transcript(
+            [
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {"last_token_usage": {"total_tokens": c.CONTEXT_LIMIT + 1}},
+                    },
+                }
+            ]
+        )
+        reason = c.check_context({"transcript_path": path})
+        self.assertIsNotNone(reason)
+        self.assertIsNotNone(c.HANDOFF_REASON_PATTERN.search(reason))
+
+    def test_it_matches_the_quota_reason(self):
+        import time as _time
+
+        path = self.transcript(
+            [
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "rate_limits": {
+                            "primary": {"used_percent": 99.0, "resets_at": _time.time() + 1800}
+                        },
+                    },
+                }
+            ]
+        )
+        reason = c.check_quota({"transcript_path": path})
+        self.assertIsNotNone(reason)
+        self.assertIsNotNone(c.HANDOFF_REASON_PATTERN.search(reason))
+
+    def test_it_does_not_match_the_idle_reason(self):
+        reason = "Blocked: 75 min since the last agent reply (>3570s). Add 'resume' or 'continue'."
+        self.assertIsNone(c.HANDOFF_REASON_PATTERN.search(reason))
 
 
 if __name__ == "__main__":

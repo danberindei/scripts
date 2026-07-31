@@ -12,9 +12,11 @@ stdin is the hook JSON payload. --config DIR sets the config dir for the quota
 check (default: $CLAUDE_CONFIG_DIR or ~/.claude); other checks ignore it.
 
 Handoff bypass: a prompt containing session-handoff is allowed through. The
-Skill(session-handoff) tool call is also allowed through, but later tool calls
-remain subject to their checks. Each check keeps its own narrower bypasses (see
-the individual functions).
+Skill(session-handoff) tool call is also allowed through, and it arms a bypass
+for HANDOFF_TOOLS for the rest of the turn so the handoff can persist work
+product it holds only in context; other later tool calls remain subject to their
+checks. Each check keeps its own narrower bypasses (see the individual
+functions).
 
 A blocking check writes a JSON decision to stdout and exits 0; the shape depends
 on the hook event (PreToolUse denies the tool call, other events block the
@@ -143,6 +145,7 @@ def arm_bypass(session_id, prompt, tool_name, skill_arg):
     Turn-scoped bypasses are cleared at the start of each new prompt and re-derived
     from it; session-scoped bypasses persist. Scopes:
       turn "all"      -- every check (a prompt containing session-handoff)
+      turn "handoff"  -- HANDOFF_TOOLS only (the Skill(session-handoff) tool call)
       turn "context"  -- context check   ("ignore context limit")
       turn "quota"    -- quota check      ("continue in X" / "snooze for X")
       session "quota" -- quota check for the rest of the session ("ignore quota")
@@ -163,6 +166,14 @@ def arm_bypass(session_id, prompt, tool_name, skill_arg):
         if QUOTA_PERSISTENT_PATTERN.search(prompt) and "quota" not in state["session"]:
             state["session"].append("quota")
 
+    if (
+        tool_name == "Skill"
+        and skill_arg == "session-handoff"
+        and "handoff" not in state["turn"]
+    ):
+        state["turn"].append("handoff")
+        changed = True
+
     if changed:
         _save_bypass(session_id, state)
     return state
@@ -171,12 +182,25 @@ def arm_bypass(session_id, prompt, tool_name, skill_arg):
 # Checks that no bypass may unblock: a wrong flag is wrong during a handoff too.
 NEVER_BYPASSED = {"rgflags"}
 
+# Tools an armed handoff may still use, to persist work product and land the edit
+# it was interrupted mid-way through.
+HANDOFF_TOOLS = {"Write", "Edit"}
+
 
 def bypassed(state, check):
     """True if this check is bypassed by the current state."""
     if check in NEVER_BYPASSED:
         return False
     return "all" in state["turn"] or check in state["turn"] or check in state["session"]
+
+
+def handoff_tool_allowed(state, event_name, tool_name):
+    """True for an edit the armed handoff may make despite an otherwise blocking check."""
+    return (
+        event_name == "PreToolUse"
+        and tool_name in HANDOFF_TOOLS
+        and "handoff" in state["turn"]
+    )
 
 
 def check_context(data, config_dir):
@@ -490,8 +514,11 @@ def main(argv):
     )
 
     event_name = data.get("hook_event_name") or ""
+    handoff_tool = handoff_tool_allowed(state, event_name, tool_name)
     for name in checks:
         if event_name == "PreToolUse" and is_handoff_skill:
+            continue
+        if handoff_tool and name not in NEVER_BYPASSED:
             continue
         fn = CHECKS.get(name)
         if fn is None:
