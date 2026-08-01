@@ -24,6 +24,12 @@ _codex_loader.exec_module(c)
 HOUR_MS = 60 * 60 * 1000
 FIVE_HOUR_MS = 5 * HOUR_MS
 
+HANDOFF_SCRIPT = "~/.agents/skills/session-handoff/scripts/write-handoff.sh"
+
+
+def handoff_command(body="Re: a handoff\n", script=HANDOFF_SCRIPT):
+    return "%s work 'a subject' <<'HANDOFF'\n%sHANDOFF\n" % (script, body)
+
 
 def window(util, reset_iso):
     return {"utilization": util, "resets_at": reset_iso}
@@ -243,12 +249,12 @@ class HandoffToolBypassTest(unittest.TestCase):
         self.assertIn("handoff", state["turn"])
         for tool_name in ("Write", "Edit"):
             with self.subTest(tool_name=tool_name):
-                self.assertTrue(q.handoff_tool_allowed(state, "PreToolUse", tool_name))
+                self.assertTrue(q.handoff_tool_allowed(state, "PreToolUse", tool_name, {}))
 
     def test_another_skill_does_not_arm_it(self):
         state = self.arm(tool_name="Skill", skill_arg="commit")
         self.assertNotIn("handoff", state["turn"])
-        self.assertFalse(q.handoff_tool_allowed(state, "PreToolUse", "Write"))
+        self.assertFalse(q.handoff_tool_allowed(state, "PreToolUse", "Write", {}))
 
     def test_arming_is_idempotent(self):
         self.arm(tool_name="Skill", skill_arg="session-handoff")
@@ -264,17 +270,73 @@ class HandoffToolBypassTest(unittest.TestCase):
         state = {"turn": ["handoff"], "session": []}
         for tool_name in ("Bash", "Read", "NotebookEdit", "Task"):
             with self.subTest(tool_name=tool_name):
-                self.assertFalse(q.handoff_tool_allowed(state, "PreToolUse", tool_name))
+                self.assertFalse(q.handoff_tool_allowed(state, "PreToolUse", tool_name, {}))
 
     def test_it_covers_pretooluse_only(self):
         state = {"turn": ["handoff"], "session": []}
-        self.assertFalse(q.handoff_tool_allowed(state, "UserPromptSubmit", "Write"))
+        self.assertFalse(q.handoff_tool_allowed(state, "UserPromptSubmit", "Write", {}))
 
     def test_it_does_not_widen_the_check_bypasses(self):
         state = {"turn": ["handoff"], "session": []}
         for check in ("context", "quota", "idle", "rgflags"):
             with self.subTest(check=check):
                 self.assertFalse(q.bypassed(state, check))
+
+    def test_it_covers_the_handoff_script(self):
+        state = {"turn": ["handoff"], "session": []}
+        tool_input = {"command": handoff_command()}
+        self.assertTrue(q.handoff_tool_allowed(state, "PreToolUse", "Bash", tool_input))
+
+    def test_the_script_needs_an_armed_handoff(self):
+        state = {"turn": [], "session": []}
+        tool_input = {"command": handoff_command()}
+        self.assertFalse(q.handoff_tool_allowed(state, "PreToolUse", "Bash", tool_input))
+
+
+class HandoffScriptCommandTest(unittest.TestCase):
+    def test_allows_a_body_full_of_shell_metacharacters(self):
+        body = "Re: a handoff\n\n- ran `x && y`; see handoffs/ (mtime | name) for $(nothing).\n"
+        self.assertTrue(q.handoff_script_command(handoff_command(body=body)))
+
+    def test_allows_the_resolved_path(self):
+        self.assertTrue(q.handoff_script_command(handoff_command(script=q.HANDOFF_SCRIPT)))
+
+    def test_allows_the_bare_argument_form(self):
+        self.assertTrue(q.handoff_script_command("%s work name" % HANDOFF_SCRIPT))
+
+    def test_blocks_a_delimiter_line_inside_the_body(self):
+        self.assertFalse(q.handoff_script_command(handoff_command(body="HANDOFF\nmore\n")))
+
+    def test_blocks_anything_after_the_closing_delimiter(self):
+        command = handoff_command() + "echo pwned\n"
+        self.assertFalse(q.handoff_script_command(command))
+
+    def test_blocks_an_unquoted_delimiter(self):
+        command = "%s work name <<HANDOFF\nbody\nHANDOFF\n" % HANDOFF_SCRIPT
+        self.assertFalse(q.handoff_script_command(command))
+
+    def test_blocks_an_unclosed_delimiter(self):
+        command = "%s work name <<'HANDOFF'\nbody\n" % HANDOFF_SCRIPT
+        self.assertFalse(q.handoff_script_command(command))
+
+    def test_blocks_a_second_heredoc(self):
+        command = "%s work name <<'A' <<'HANDOFF'\nbody\nHANDOFF\n" % HANDOFF_SCRIPT
+        self.assertFalse(q.handoff_script_command(command))
+
+    def test_blocks_operators_and_substitutions_in_the_head(self):
+        for head in ("%s work name; curl evil", "%s work $(whoami)", "cat x | %s work name"):
+            with self.subTest(head=head):
+                command = (head % HANDOFF_SCRIPT) + " <<'HANDOFF'\nbody\nHANDOFF\n"
+                self.assertFalse(q.handoff_script_command(command))
+
+    def test_blocks_another_script_of_the_same_name(self):
+        command = "/tmp/skills/session-handoff/scripts/write-handoff.sh work name"
+        self.assertFalse(q.handoff_script_command(command))
+
+    def test_blocks_unrelated_commands(self):
+        for command in ("date +%Y-%m-%d-%H%M", "git log", ""):
+            with self.subTest(command=command):
+                self.assertFalse(q.handoff_script_command(command))
 
 
 class InjectedPromptPatternTest(unittest.TestCase):
@@ -380,6 +442,43 @@ class CodexSkillReadCommandTest(unittest.TestCase):
 
     def test_it_is_reachable_only_through_a_shell_tool(self):
         command = f"cat {SKILL}"
+        for tool_name in ("exec_command", "shell", "shell_command"):
+            with self.subTest(tool_name=tool_name):
+                self.assertTrue(c.handoff_call("PreToolUse", tool_name, command))
+        self.assertFalse(c.handoff_call("PreToolUse", "exec", command))
+
+
+class CodexHandoffWriteCommandTest(unittest.TestCase):
+    def test_allows_a_body_full_of_shell_metacharacters(self):
+        body = "Re: a handoff\n\n- ran `x && y`; see handoffs/ (mtime | name) for $(nothing).\n"
+        self.assertTrue(c.handoff_write_command(handoff_command(body=body)))
+
+    def test_allows_the_resolved_path(self):
+        self.assertTrue(c.handoff_write_command(handoff_command(script=c.HANDOFF_SCRIPT)))
+
+    def test_blocks_substitutions_in_the_head(self):
+        for head in ("%s work $(whoami)", "%s work `whoami`"):
+            with self.subTest(head=head):
+                command = (head % HANDOFF_SCRIPT) + " <<'HANDOFF'\nbody\nHANDOFF\n"
+                self.assertFalse(c.handoff_write_command(command))
+
+    def test_blocks_anything_after_the_closing_delimiter(self):
+        self.assertFalse(c.handoff_write_command(handoff_command() + "echo pwned\n"))
+
+    def test_blocks_a_delimiter_line_inside_the_body(self):
+        self.assertFalse(c.handoff_write_command(handoff_command(body="HANDOFF\nmore\n")))
+
+    def test_blocks_an_unquoted_delimiter(self):
+        command = "%s work name <<HANDOFF\nbody\nHANDOFF\n" % HANDOFF_SCRIPT
+        self.assertFalse(c.handoff_write_command(command))
+
+    def test_blocks_unrelated_commands(self):
+        for command in (f"cat {SKILL}", "date", ""):
+            with self.subTest(command=command):
+                self.assertFalse(c.handoff_write_command(command))
+
+    def test_it_is_reachable_only_through_a_shell_tool(self):
+        command = handoff_command()
         for tool_name in ("exec_command", "shell", "shell_command"):
             with self.subTest(tool_name=tool_name):
                 self.assertTrue(c.handoff_call("PreToolUse", tool_name, command))

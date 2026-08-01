@@ -12,9 +12,9 @@ stdin is the hook JSON payload. A blocking check writes a JSON decision to
 stdout and exits 0. No output means allow. See emit_block.
 
 Handoff bypass: a prompt containing session-handoff is allowed through. A check
-whose reason tells the agent to hand off does not block the two calls the handoff
-itself needs (see handoff_call): the edit that reason interrupts, and reading the
-SKILL.md it names. Every other tool call is still blocked, and rgflags still
+whose reason tells the agent to hand off does not block the calls the handoff
+itself needs (see handoff_call): the edit that reason interrupts, reading the
+SKILL.md it names, and running the script that writes the handoff file. Every other tool call is still blocked, and rgflags still
 blocks both. Each check keeps its own narrower bypasses (see the individual
 functions).
 """
@@ -179,13 +179,15 @@ def bypassed(state, check):
 
 
 def handoff_call(event_name, tool_name, command):
-    """True for a call the handoff itself needs: the edit a block interrupts, or
-    reading the SKILL.md the block tells the agent to run."""
+    """True for a call the handoff itself needs: the edit a block interrupts, reading
+    the SKILL.md the block tells the agent to run, or writing the handoff file."""
     if event_name != "PreToolUse":
         return False
     if tool_name in HANDOFF_TOOLS:
         return True
-    return tool_name in SHELL_TOOLS and skill_read_command(command)
+    if tool_name not in SHELL_TOOLS:
+        return False
+    return skill_read_command(command) or handoff_write_command(command)
 
 
 def transcript_path(data):
@@ -250,6 +252,10 @@ RG_VALUE_FLAGS = {"-e", "-f", "-g", "--regexp", "--file", "--glob", "--iglob"}
 RG_SHORT_R = re.compile(r"^-[A-Za-z]*r[A-Za-z]*$")
 
 HANDOFF_SKILL_PATTERN = re.compile(r"(?:^|/)session-handoff/SKILL\.md$")
+HANDOFF_SCRIPT = os.path.realpath(
+    os.path.expanduser("~/.agents/skills/session-handoff/scripts/write-handoff.sh")
+)
+HANDOFF_HEREDOC = re.compile(r"<<'([A-Z][A-Z0-9_]*)'\n")
 # Readers with no flag that writes. head and tail also take a bare count.
 FLAG_ONLY_READERS = {"cat", "nl", "wc"}
 COUNT_READERS = {"head", "tail"}
@@ -308,6 +314,30 @@ def skill_read_command(command):
     if name == "sed":
         return len(args) == 2 and args[0] == "-n" and bool(SED_RANGE_PATTERN.match(args[1]))
     return False
+
+
+def handoff_write_command(command):
+    """True if command does nothing but run the handoff writer with its body on stdin.
+
+    The body is left unread: the quoted delimiter keeps the shell out of it, and
+    nothing may follow the first delimiter line.
+    """
+    heredoc = HANDOFF_HEREDOC.search(command)
+    head = command
+    if heredoc:
+        head = command[: heredoc.start()]
+        lines = command[heredoc.end():].split("\n")
+        delimiter = heredoc.group(1)
+        if delimiter not in lines:
+            return False
+        if any(line.strip() for line in lines[lines.index(delimiter) + 1:]):
+            return False
+    if any(ch in head for ch in "`$\n"):
+        return False
+    tokens = shell_tokens(head)
+    if not tokens or any(token in SHELL_OPERATORS for token in tokens[1:]):
+        return False
+    return os.path.realpath(os.path.expanduser(tokens[0])) == HANDOFF_SCRIPT
 
 
 def rg_arg_spans(tokens):

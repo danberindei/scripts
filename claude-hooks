@@ -13,9 +13,9 @@ check (default: $CLAUDE_CONFIG_DIR or ~/.claude); other checks ignore it.
 
 Handoff bypass: a prompt containing session-handoff is allowed through. The
 Skill(session-handoff) tool call is also allowed through, and it arms a bypass
-for HANDOFF_TOOLS for the rest of the turn so the handoff can persist work
-product it holds only in context; other later tool calls remain subject to their
-checks. Each check keeps its own narrower bypasses (see the individual
+for HANDOFF_TOOLS and the HANDOFF_SCRIPT command for the rest of the turn so the
+handoff can write its file and persist work product it holds only in context;
+other later tool calls remain subject to their checks. Each check keeps its own narrower bypasses (see the individual
 functions).
 
 A blocking check writes a JSON decision to stdout and exits 0; the shape depends
@@ -186,6 +186,12 @@ NEVER_BYPASSED = {"rgflags"}
 # it was interrupted mid-way through.
 HANDOFF_TOOLS = {"Write", "Edit"}
 
+# The only command an armed handoff may run: the script that writes its file.
+HANDOFF_SCRIPT = os.path.realpath(
+    os.path.expanduser("~/.agents/skills/session-handoff/scripts/write-handoff.sh")
+)
+HANDOFF_HEREDOC = re.compile(r"<<'([A-Z][A-Z0-9_]*)'\n")
+
 
 def bypassed(state, check):
     """True if this check is bypassed by the current state."""
@@ -194,13 +200,42 @@ def bypassed(state, check):
     return "all" in state["turn"] or check in state["turn"] or check in state["session"]
 
 
-def handoff_tool_allowed(state, event_name, tool_name):
-    """True for an edit the armed handoff may make despite an otherwise blocking check."""
-    return (
-        event_name == "PreToolUse"
-        and tool_name in HANDOFF_TOOLS
-        and "handoff" in state["turn"]
-    )
+def handoff_script_command(command):
+    """True when the command runs HANDOFF_SCRIPT and nothing follows its quoted heredoc."""
+    heredoc = HANDOFF_HEREDOC.search(command)
+    head = command
+    if heredoc:
+        head = command[: heredoc.start()]
+        lines = command[heredoc.end():].split("\n")
+        delimiter = heredoc.group(1)
+        if delimiter not in lines:
+            return False
+        # a delimiter line ends the body, so anything after the first one would run as shell
+        if any(line.strip() for line in lines[lines.index(delimiter) + 1:]):
+            return False
+    lexer = shlex.shlex(head, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    if os.path.realpath(os.path.expanduser(tokens[0])) != HANDOFF_SCRIPT:
+        return False
+    return not any(token in SHELL_OPERATORS for token in tokens[1:])
+
+
+def handoff_tool_allowed(state, event_name, tool_name, tool_input):
+    """True for a call the armed handoff may make despite an otherwise blocking check."""
+    if event_name != "PreToolUse" or "handoff" not in state["turn"]:
+        return False
+    if tool_name in HANDOFF_TOOLS:
+        return True
+    if tool_name != "Bash":
+        return False
+    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+    return handoff_script_command(command)
 
 
 def check_context(data, config_dir):
@@ -219,8 +254,8 @@ def check_context(data, config_dir):
     if tokens is not None and tokens > CONTEXT_LIMIT:
         return (
             f"Context at {tokens} tokens (>{CONTEXT_LIMIT}) - invoke the "
-            "session-handoff skill now (call Skill with skill='session-handoff'), "
-            "then stop."
+            "session-handoff skill now (call Skill with skill='session-handoff') "
+            "first, before writing any files, then stop."
         )
     return None
 
@@ -514,7 +549,7 @@ def main(argv):
     )
 
     event_name = data.get("hook_event_name") or ""
-    handoff_tool = handoff_tool_allowed(state, event_name, tool_name)
+    handoff_tool = handoff_tool_allowed(state, event_name, tool_name, tool_input)
     for name in checks:
         if event_name == "PreToolUse" and is_handoff_skill:
             continue
