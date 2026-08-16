@@ -55,7 +55,7 @@ if not target:
     sys.exit(0)
 
 project_name = os.path.basename(os.path.abspath(target))
-title_regex = r"^" + re.escape(project_name) + r"\s+[-\u2013]\s+.*"
+title_regex = r"^" + re.escape(project_name) + r"(\s+\[[^\]]*\])?\s+[-\u2013]\s+.*"
 
 subprocess.run([
     "wl-focus",
