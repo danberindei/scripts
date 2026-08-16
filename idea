@@ -29,11 +29,23 @@ def non_option_paths(argv):
     return paths
 
 
+def project_root(path):
+    candidate = os.path.abspath(path)
+    if not os.path.isdir(candidate):
+        candidate = os.path.dirname(candidate)
+    while candidate != os.path.dirname(candidate):
+        if os.path.isdir(os.path.join(candidate, ".idea")):
+            return candidate
+        candidate = os.path.dirname(candidate)
+    return None
+
+
 def choose_target(argv):
     paths = non_option_paths(argv)
-    for path in paths:
-        if os.path.isdir(path) and os.path.isdir(os.path.join(path, ".idea")):
-            return path
+    for path in reversed(paths):
+        root = project_root(path)
+        if root:
+            return root
     return paths[0] if paths else None
 
 
