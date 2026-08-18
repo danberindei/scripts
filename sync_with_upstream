@@ -118,6 +118,7 @@ def handle_release_branches():
         run_git("merge --ff-only -q %s/%s" % (upstream_repo, relbranch))
       except:
         print("Fast-forward on upstream failed for %s (local commits not in upstream?)" % relbranch)
+        run_git("checkout -q %s" % checked_out_branch)
         sys.exit(3)
     else:
       #print("Branch %s hasn't changed upstream" % branch)
