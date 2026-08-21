@@ -51,18 +51,33 @@ def choose_target(argv):
     return paths[0] if paths else None
 
 
+def focus(title_regex, wait="0"):
+    return subprocess.run([
+        "wl-focus",
+        "--wm-class", "jetbrains-idea",
+        "--title-regex", title_regex,
+        "--wait", wait,
+    ]).returncode == 0
+
+
 target = choose_target(args)
 subprocess.run([REAL_IDEA] + args)
 
 if not target:
     sys.exit(0)
 
-project_name = os.path.basename(os.path.abspath(target))
-title_regex = r"^" + re.escape(project_name) + r"(\s+\[[^\]]*\])?\s+[-–]\s+.*"
+abs_target = os.path.abspath(target)
+name = re.escape(os.path.basename(abs_target))
+parent = re.escape(os.path.basename(os.path.dirname(abs_target)))
 
-subprocess.run([
-    "wl-focus",
-    "--wm-class", "jetbrains-idea",
-    "--title-regex", title_regex,
-    "--wait", "10",
-])
+paths = non_option_paths(args)
+opened_file = paths[-1] if paths and os.path.abspath(paths[-1]) != abs_target else None
+
+# Same-named projects always differ in parent directory, and IDEA labels a
+# window "name [path]" only while a same-named one is open.  Match the parent
+# in that label, else a title with no label, else the just-opened file.
+if not focus(rf"^{name}\s+\[[^\]]*\b{parent}\b"):
+    if not focus(rf"^{name}\s+[-–]\s+"):
+        if opened_file is not None:
+            file_name = re.escape(os.path.basename(opened_file))
+            focus(rf"^{name}(\s+\[[^\]]*\])?\s+[-–]\s+.*{file_name}", "10")
