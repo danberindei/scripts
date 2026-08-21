@@ -11,6 +11,8 @@ import re
 import subprocess
 import sys
 
+REAL_IDEA = os.path.expanduser("~/.local/bin/idea")
+
 args = sys.argv[1:]
 
 def non_option_paths(argv):
@@ -50,18 +52,17 @@ def choose_target(argv):
 
 
 target = choose_target(args)
+subprocess.run([REAL_IDEA] + args)
+
 if not target:
-    subprocess.run(["wl-focus", "--skip-realpath", os.path.realpath(__file__), "--", "idea"] + args)
     sys.exit(0)
 
 project_name = os.path.basename(os.path.abspath(target))
-title_regex = r"^" + re.escape(project_name) + r"(\s+\[[^\]]*\])?\s+[-\u2013]\s+.*"
+title_regex = r"^" + re.escape(project_name) + r"(\s+\[[^\]]*\])?\s+[-–]\s+.*"
 
 subprocess.run([
     "wl-focus",
     "--wm-class", "jetbrains-idea",
     "--title-regex", title_regex,
     "--wait", "10",
-    "--skip-realpath", os.path.realpath(__file__),
-    "--", "idea",
-] + args)
+])

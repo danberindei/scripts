@@ -109,16 +109,15 @@ if [[ -n "${project_dir:-}" ]]; then
   debug "project_dir=$project_dir"
 fi
 
-if ! command -v idea >/dev/null 2>&1; then
-  echo "IntelliJ launcher not found on PATH ('idea')." >&2
+idea_bin="/home/dan/Tools/bin/idea"
+if [[ ! -x "$idea_bin" ]]; then
+  echo "IntelliJ launcher wrapper not found: $idea_bin" >&2
   exit 1
 fi
-debug "idea_bin=idea"
+debug "idea_bin=$idea_bin"
 
 if [[ -n "${project_dir:-}" ]]; then
-  idea "$project_dir" ${line:+--line "$line"} "$file" &
+  "$idea_bin" "$project_dir" ${line:+--line "$line"} "$file"
 else
-  idea ${line:+--line "$line"} "$file" &
+  "$idea_bin" ${line:+--line "$line"} "$file"
 fi
-idea_cli_pid=$!
-wait "$idea_cli_pid"
