@@ -15,24 +15,6 @@ debug() {
   fi
 }
 
-find_project_dir_for_file() {
-  local target_file="$1"
-  local dir
-  local probe
-
-  dir="$(dirname "$target_file")"
-  probe="$dir"
-  while [[ "$probe" != "/" && -n "$probe" ]]; do
-    if [[ -d "$probe/.idea" ]]; then
-      echo "$probe"
-      return 0
-    fi
-    probe="$(dirname "$probe")"
-  done
-
-  git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true
-}
-
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 path/to/file.ext:line" >&2
   exit 2
@@ -104,11 +86,6 @@ if command -v realpath >/dev/null 2>&1; then
   file="$(realpath "$file")"
 fi
 debug "final_file=$file final_line=$line"
-project_dir="$(find_project_dir_for_file "$file")"
-if [[ -n "${project_dir:-}" ]]; then
-  debug "project_dir=$project_dir"
-fi
-
 idea_bin="/home/dan/Tools/bin/idea"
 if [[ ! -x "$idea_bin" ]]; then
   echo "IntelliJ launcher wrapper not found: $idea_bin" >&2
@@ -116,8 +93,4 @@ if [[ ! -x "$idea_bin" ]]; then
 fi
 debug "idea_bin=$idea_bin"
 
-if [[ -n "${project_dir:-}" ]]; then
-  "$idea_bin" "$project_dir" ${line:+--line "$line"} "$file"
-else
-  "$idea_bin" ${line:+--line "$line"} "$file"
-fi
+"$idea_bin" ${line:+--line "$line"} "$file"
