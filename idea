@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Open a project in IntelliJ IDEA and raise its window on Wayland.
+# Open a file in IntelliJ IDEA and raise its window on Wayland.
 #
 # On Wayland a backgrounded IDE cannot focus itself, and the `idea` launcher
 # only forwards "open this" to the running instance over a socket and exits,
@@ -13,22 +13,39 @@ import sys
 
 REAL_IDEA = os.path.expanduser("~/.local/bin/idea")
 
-args = sys.argv[1:]
 
-def non_option_paths(argv):
+def parse_args(argv):
+    line = None
     paths = []
-    skip_next = False
-    for arg in argv:
-        if skip_next:
-            skip_next = False
-            continue
-        if arg in {"--line", "-l"}:
-            skip_next = True
-            continue
-        if arg.startswith("-"):
-            continue
-        paths.append(arg)
-    return paths
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("--line", "-l"):
+            i += 1
+            if i >= len(argv):
+                sys.exit("idea: --line requires a value")
+            line = argv[i]
+        elif arg.startswith("--line="):
+            line = arg[len("--line="):]
+        elif arg.startswith("-") and arg != "-":
+            sys.exit(f"idea: unknown option {arg!r}")
+        else:
+            paths.append(arg)
+        i += 1
+    if len(paths) != 1:
+        sys.exit("idea: expected exactly one path argument")
+    return paths[0], line
+
+
+def git_toplevel():
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            check=True, capture_output=True, text=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
 
 
 def project_root(path):
@@ -42,52 +59,43 @@ def project_root(path):
     return None
 
 
-def choose_target(argv):
-    paths = non_option_paths(argv)
-    for path in reversed(paths):
-        root = project_root(path)
-        if root:
-            return root
-    return paths[0] if paths else None
+path, line = parse_args(sys.argv[1:])
 
+toplevel = git_toplevel()
+# A relative path is cwd-relative first; fall back to the git root, like
+# open-idea-fileline, then make it absolute for the launcher.
+if not os.path.isabs(path):
+    if not os.path.isfile(path) and toplevel and os.path.isfile(os.path.join(toplevel, path)):
+        path = os.path.join(toplevel, path)
+path = os.path.abspath(path)
 
-def focus(title_regex, wait="0"):
-    return subprocess.run([
-        "wl-focus",
-        "--wm-class", "jetbrains-idea",
-        "--title-regex", title_regex,
-        "--wait", wait,
-    ]).returncode == 0
+real_args = [REAL_IDEA]
+if line is not None:
+    real_args += ["--line", line]
+real_args.append(path)
+subprocess.run(real_args)
 
-
-target = choose_target(args)
-
-if not target:
-    subprocess.run([REAL_IDEA] + args)
+# Raise the project window.  IDEA titles a window with the project directory
+# name (the .idea ancestor), or the git root's basename when there is no .idea.
+root = project_root(path) or toplevel
+if not root:
     sys.exit(0)
 
-abs_target = os.path.abspath(target)
-name = re.escape(os.path.basename(abs_target))
-parent = re.escape(os.path.basename(os.path.dirname(abs_target)))
+abs_root = os.path.abspath(root)
+name = re.escape(os.path.basename(abs_root))
+parent = re.escape(os.path.basename(os.path.dirname(abs_root)))
 
-paths = non_option_paths(args)
-opened_file = paths[-1] if paths and os.path.abspath(paths[-1]) != abs_target else None
-
-# Same-named projects always differ in parent directory, and IDEA labels a
-# window "name [path]" only while a same-named one is open.  Match the parent
-# in that label, else a title with no label, else the just-opened file.
+# Same-named projects are told apart by the parent directory in IDEA's
+# "name [path]" label.  Two projects that share both leaf and parent names
+# (e.g. /a/work/proj and /b/work/proj) still collide; the label regex then
+# matches whichever window Switchboard lists first.
 label = rf"^{name}\s+\[[^\]]*\b{parent}\b"
 plain = rf"^{name}\s+[-–]\s+"
 
-# Focusing an already-open project needs no launcher round trip; forward only
-# to open a project with no window yet, or to reach the IDE with a file.
-if opened_file is None:
-    if not (focus(label) or focus(plain)):
-        subprocess.run([REAL_IDEA] + args)
-        focus(rf"^{name}\s+(\[[^\]]*\b{parent}\b|[-–]\s+)", "10")
-    sys.exit(0)
-
-subprocess.run([REAL_IDEA] + args)
-if not (focus(label) or focus(plain)):
-    file_name = re.escape(os.path.basename(opened_file))
-    focus(rf"^{name}(\s+\[[^\]]*\])?\s+[-–]\s+.*{file_name}", "10")
+subprocess.run([
+    "wl-focus",
+    "--wm-class", "jetbrains-idea",
+    "--title-regex", label,
+    "--title-regex", plain,
+    "--wait", "10",
+])
