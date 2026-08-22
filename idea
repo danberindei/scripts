@@ -61,9 +61,9 @@ def focus(title_regex, wait="0"):
 
 
 target = choose_target(args)
-subprocess.run([REAL_IDEA] + args)
 
 if not target:
+    subprocess.run([REAL_IDEA] + args)
     sys.exit(0)
 
 abs_target = os.path.abspath(target)
@@ -76,8 +76,18 @@ opened_file = paths[-1] if paths and os.path.abspath(paths[-1]) != abs_target el
 # Same-named projects always differ in parent directory, and IDEA labels a
 # window "name [path]" only while a same-named one is open.  Match the parent
 # in that label, else a title with no label, else the just-opened file.
-if not focus(rf"^{name}\s+\[[^\]]*\b{parent}\b"):
-    if not focus(rf"^{name}\s+[-–]\s+"):
-        if opened_file is not None:
-            file_name = re.escape(os.path.basename(opened_file))
-            focus(rf"^{name}(\s+\[[^\]]*\])?\s+[-–]\s+.*{file_name}", "10")
+label = rf"^{name}\s+\[[^\]]*\b{parent}\b"
+plain = rf"^{name}\s+[-–]\s+"
+
+# Focusing an already-open project needs no launcher round trip; forward only
+# to open a project with no window yet, or to reach the IDE with a file.
+if opened_file is None:
+    if not (focus(label) or focus(plain)):
+        subprocess.run([REAL_IDEA] + args)
+        focus(rf"^{name}\s+(\[[^\]]*\b{parent}\b|[-–]\s+)", "10")
+    sys.exit(0)
+
+subprocess.run([REAL_IDEA] + args)
+if not (focus(label) or focus(plain)):
+    file_name = re.escape(os.path.basename(opened_file))
+    focus(rf"^{name}(\s+\[[^\]]*\])?\s+[-–]\s+.*{file_name}", "10")
