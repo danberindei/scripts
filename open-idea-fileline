@@ -43,38 +43,19 @@ if [[ ! -f "$file" ]]; then
   fi
 fi
 
-# If the file path is incomplete, try resolving with fd from the current dir.
-if [[ ! -f "$file" ]] && command -v fd >/dev/null 2>&1; then
-  base_name="$(basename "$file")"
+# If the file path is incomplete, try resolving with fd within the git root.
+if [[ ! -f "$file" ]] && [[ -n "${root:-}" ]] && command -v fd >/dev/null 2>&1; then
   wanted_suffix="${file#./}"
-  mapfile -t fd_candidates < <(fd --type f --hidden --follow --exclude .git --fixed-strings "$base_name" . 2>/dev/null || true)
+  mapfile -t fd_candidates < <(fd --type f --hidden --one-file-system --exclude .git -p --fixed-strings "$wanted_suffix" "$root" 2>/dev/null || true)
 
-  if [[ ${#fd_candidates[@]} -gt 0 ]]; then
-    suffix_matches=()
-    for candidate in "${fd_candidates[@]}"; do
-      candidate_rel="${candidate#./}"
-      if [[ "$candidate_rel" == "$wanted_suffix" || "$candidate_rel" == *"/$wanted_suffix" ]]; then
-        suffix_matches+=("$candidate")
-      fi
-    done
-
-    if [[ ${#suffix_matches[@]} -eq 1 ]]; then
-      file="${suffix_matches[0]}"
-      debug "resolved_from_fd_suffix=$file"
-    elif [[ ${#suffix_matches[@]} -gt 1 ]]; then
-      echo "ambiguous file reference: $file" >&2
-      printf 'matches:\n' >&2
-      printf ' - %s\n' "${suffix_matches[@]}" >&2
-      exit 1
-    elif [[ ${#fd_candidates[@]} -eq 1 ]]; then
-      file="${fd_candidates[0]}"
-      debug "resolved_from_fd_basename=$file"
-    else
-      echo "ambiguous file reference: $file" >&2
-      printf 'basename matches:\n' >&2
-      printf ' - %s\n' "${fd_candidates[@]}" >&2
-      exit 1
-    fi
+  if [[ ${#fd_candidates[@]} -eq 1 ]]; then
+    file="${fd_candidates[0]}"
+    debug "resolved_from_fd_suffix=$file"
+  elif [[ ${#fd_candidates[@]} -gt 1 ]]; then
+    echo "ambiguous file reference: $file" >&2
+    printf 'matches:\n' >&2
+    printf ' - %s\n' "${fd_candidates[@]}" >&2
+    exit 1
   fi
 fi
 
