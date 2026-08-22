@@ -73,13 +73,13 @@ real_args = [REAL_IDEA]
 if line is not None:
     real_args += ["--line", line]
 real_args.append(path)
-subprocess.run(real_args)
+launcher = subprocess.Popen(real_args)
 
 # Raise the project window.  IDEA titles a window with the project directory
 # name (the .idea ancestor), or the git root's basename when there is no .idea.
 root = project_root(path) or toplevel
 if not root:
-    sys.exit(0)
+    sys.exit(launcher.wait())
 
 abs_root = os.path.abspath(root)
 name = re.escape(os.path.basename(abs_root))
@@ -99,3 +99,5 @@ subprocess.run([
     "--title-regex", plain,
     "--wait", "10",
 ])
+
+sys.exit(launcher.wait())
