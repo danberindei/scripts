@@ -47,14 +47,18 @@ fi
 if [[ ! -f "$file" ]] && [[ -n "${root:-}" ]] && command -v fd >/dev/null 2>&1; then
   wanted_suffix="${file#./}"
   mapfile -t fd_candidates < <(fd --type f --hidden --one-file-system --exclude .git -p --fixed-strings "$wanted_suffix" "$root" 2>/dev/null || true)
+  anchored_candidates=()
+  for cand in "${fd_candidates[@]}"; do
+    [[ "$cand" == *"$wanted_suffix" ]] && anchored_candidates+=("$cand")
+  done
 
-  if [[ ${#fd_candidates[@]} -eq 1 ]]; then
-    file="${fd_candidates[0]}"
+  if [[ ${#anchored_candidates[@]} -eq 1 ]]; then
+    file="${anchored_candidates[0]}"
     debug "resolved_from_fd_suffix=$file"
-  elif [[ ${#fd_candidates[@]} -gt 1 ]]; then
+  elif [[ ${#anchored_candidates[@]} -gt 1 ]]; then
     echo "ambiguous file reference: $file" >&2
     printf 'matches:\n' >&2
-    printf ' - %s\n' "${fd_candidates[@]}" >&2
+    printf ' - %s\n' "${anchored_candidates[@]}" >&2
     exit 1
   fi
 fi
