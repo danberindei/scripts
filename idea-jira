@@ -112,7 +112,7 @@ def git_roots_from_project(project_path: str) -> list[Path]:
 def git_roots_for_issue(project_path: str) -> list[Path]:
     roots = git_roots_from_project(project_path)
     if not roots:
-        roots = [Path(command_output(["git", "rev-parse", "--show-toplevel"]).strip()).resolve()]
+        roots = [Path(command_output(["git", "rev-parse", "--show-toplevel"], cwd=Path(project_path)).strip()).resolve()]
 
     seen: set[Path] = set(roots)
     workspace_projects = optional_json_for_path("GET", "/projects", project_path) or []
@@ -447,6 +447,7 @@ def main(argv: list[str]) -> int:
                 idea_failed = True
 
     branch_reused = True
+    failed_git_roots: list[Path] = []
     for git_root in git_roots:
         try:
             _, reused = ensure_branch(branch, cwd=git_root)
@@ -457,6 +458,7 @@ def main(argv: list[str]) -> int:
             stdout = (exc.stdout or "").strip()
             detail = stderr or stdout or str(exc)
             print(f"Note: could not create branch '{branch}' in {git_root}: {detail}", file=sys.stderr)
+            failed_git_roots.append(git_root)
 
     try:
         result = request_json(
@@ -490,6 +492,8 @@ def main(argv: list[str]) -> int:
         )
 
     branch_status = "reused" if branch_reused else "created"
+    if failed_git_roots:
+        branch_status += ", failed in " + ", ".join(str(r) for r in failed_git_roots)
     changelist_status = "reused" if changelist_reused else "created"
     task_status = "reused" if task_reused else "created"
     print(f"Branch: {branch} ({branch_status})")
