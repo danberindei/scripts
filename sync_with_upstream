@@ -105,7 +105,7 @@ def is_push_needed(branch):
     return True
 
 def is_rebase_needed(branch, release_branch):
-  upstream_only_commit = run_git("rev-list --cherry --right-only --max-count=1 %s..%s" % (branch, release_branch))
+  upstream_only_commit = run_git("rev-list --max-count=1 %s..%s" % (branch, release_branch))
   return upstream_only_commit != ''
 
 def has_local_only_commits(branch):
