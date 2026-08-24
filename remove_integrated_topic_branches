@@ -33,21 +33,14 @@ TOPIC_BRANCH_PREFIXES=($TOPIC_BRANCH_PREFIX)
 for prefix in "${TOPIC_BRANCH_PREFIXES[@]}"; do
   for tb in $(git_ls_branches $prefix) ; do
     rb=$(find_upstream_branch $tb)
-    # Checkout could fail because the branch is checked out in another worktree
-    if git switch -q $tb ; then
-      # The rebase could fail because it has conflicts
-      git rebase $rb $tb &>/dev/null || git rebase --abort
-      tb_head=$(git rev-parse "$tb")
-      rb_head=$(git rev-parse "$rb")
-      if [[ "$tb_head" == "$rb_head" ]] || git merge-base --is-ancestor $tb $rb ; then
-        echo Removing topic branch $tb merged in $rb
-        git checkout -q $rb
-        git branch --set-upstream-to=$rb $tb
-        git branch -d $tb
-        git push origin :$tb || true
-        if [[ "$SAVED_BRANCH" == "$tb" ]]; then
-          SAVED_BRANCH=$rb
-        fi
+    if git merge-base --is-ancestor $tb $rb ; then
+      echo Removing topic branch $tb merged in $rb
+      git checkout -q $rb
+      git branch --set-upstream-to=$rb $tb
+      git branch -d $tb
+      git push origin :$tb || true
+      if [[ "$SAVED_BRANCH" == "$tb" ]]; then
+        SAVED_BRANCH=$rb
       fi
     fi
   done
