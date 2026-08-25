@@ -84,15 +84,18 @@ if not root:
 abs_root = os.path.abspath(root)
 name = re.escape(os.path.basename(abs_root))
 parent = re.escape(os.path.basename(os.path.dirname(abs_root)))
+# A project renamed to carry its parent directory is titled "parent/leaf";
+# the default title is the leaf name alone.
+proj = rf"(?:{parent}/)?{name}"
 
 # Same-named projects are told apart by the parent directory in IDEA's
 # "name [path]" label.  Two projects that share both leaf and parent names
 # (e.g. /a/work/proj and /b/work/proj) still collide; the label regex then
 # matches whichever window Switchboard lists first.
 # A project window with no file opened is titled just the project name.
-label = rf"^{name}\s+\[[^\]]*\b{parent}\b"
-plain = rf"^{name}\s+[-–]\s+"
-bare = rf"^{name}$"
+label = rf"^{proj}\s+\[[^\]]*\b{parent}\b"
+plain = rf"^{proj}\s+[-–]\s+"
+bare = rf"^{proj}$"
 
 subprocess.run([
     "wl-focus",
