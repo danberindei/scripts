@@ -107,6 +107,46 @@ def get_proc_memory(pid):
         return {'rss_bytes': 0, 'file_bytes': 0, 'anon_bytes': 0, 'swap_bytes': 0, 'shmem_bytes': 0}
 
 
+def get_proc_proportional(pid):
+    """Read proportional memory (PSS) for a PID from /proc/pid/smaps_rollup.
+
+    Returns None when smaps_rollup is unreadable so callers can fall back to RSS."""
+    try:
+        content = Path(f"/proc/{pid}/smaps_rollup").read_text()
+        pss_kb = 0
+        pss_shmem_kb = 0
+        swap_pss_kb = 0
+        for line in content.split('\n'):
+            if line.startswith('Pss:'):
+                pss_kb = int(line.split()[1])
+            elif line.startswith('Pss_Shmem:'):
+                pss_shmem_kb = int(line.split()[1])
+            elif line.startswith('SwapPss:'):
+                swap_pss_kb = int(line.split()[1])
+        return {
+            'pss_bytes': pss_kb * 1024,
+            'pss_shmem_bytes': pss_shmem_kb * 1024,
+            'swap_pss_bytes': swap_pss_kb * 1024,
+        }
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError, ValueError):
+        return None
+
+
+def effective_proportional(proc):
+    """Effective proportional memory for a process dict, falling back to RSS.
+
+    Returns (pss, pss_shmem, swap_pss); each field uses smaps_rollup when the
+    process was measured proportionally and the resident value otherwise."""
+    proportional = proc.get('proportional')
+    if proportional is None:
+        return proc.get('rss_bytes', 0), proc.get('shmem_bytes', 0), proc.get('swap_bytes', 0)
+    return (
+        proportional['pss_bytes'],
+        proportional['pss_shmem_bytes'],
+        proportional['swap_pss_bytes'],
+    )
+
+
 def get_meminfo():
     """Parse /proc/meminfo into a dict of name -> kB."""
     info = {}
@@ -292,7 +332,7 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
     max_pid_width = max(len(str(row['root_pid'])) if row['root_pid'] is not None else 0 for row in data)
 
     # Print header
-    header = f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables (Mem)'}"
+    header = f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables (PSS)'}"
     print(bold(header, watch_mode), file=file)
 
     # Calculate fixed width for clipping. Executables column will include per-executable memory totals.
@@ -312,11 +352,10 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
         pid_str = str(row['root_pid']) if row['root_pid'] is not None else ''
         service = row['service']
 
-        # Aggregate memory per executable name (prefer /proc/<pid>/comm).
-        # Count anon+swap for each process, but include shmem and mapped files only once per executable
-        exe_anon_swap = {}
-        exe_shmem_once = {}
-        exe_file_once = {}
+        # Aggregate proportional memory per executable name (prefer /proc/<pid>/comm).
+        # PSS splits shared pages across every process mapping them, so summing it
+        # per executable avoids the double-counting that summing RSS would introduce.
+        exe_proportional = {}
         for p in (row.get('processes') or []):
             try:
                 comm = get_proc_comm(p['pid']) or ''
@@ -327,24 +366,12 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
                 cmd = p.get('cmdline') or ''
                 comm = cmd.split(' ')[0] if cmd else ''
 
-            anon = p.get('anon_bytes', 0)
-            swap = p.get('swap_bytes', 0)
-            shmem = p.get('shmem_bytes', 0)
-            file_mem = p.get('file_bytes', 0)
+            if 'proportional' not in p:
+                p['proportional'] = get_proc_proportional(p['pid'])
+            pss, _pss_shmem, swap_pss = effective_proportional(p)
+            exe_proportional[comm] = exe_proportional.get(comm, 0) + pss + swap_pss
 
-            exe_anon_swap[comm] = exe_anon_swap.get(comm, 0) + anon + swap
-            # include shared memory and mapped files only once per executable: track the max seen
-            exe_shmem_once[comm] = max(exe_shmem_once.get(comm, 0), shmem)
-            exe_file_once[comm] = max(exe_file_once.get(comm, 0), file_mem)
-
-        # Build sorted list by memory desc (anon+swap summed per-exe + shmem/file counted once per-exe)
-        exe_items = []
-        for name, anon_swap_sum in exe_anon_swap.items():
-            shmem_once = exe_shmem_once.get(name, 0)
-            file_once = exe_file_once.get(name, 0)
-            total = anon_swap_sum + shmem_once + file_once
-            exe_items.append((name, total))
-
+        exe_items = list(exe_proportional.items())
         exe_items.sort(key=lambda x: x[1], reverse=True)
         exes_with_mem = [f"{human_size(size)} {name}" for name, size in exe_items if name]
         exes_str = ', '.join(exes_with_mem)
@@ -384,7 +411,7 @@ def print_processes_table(data, title=None, watch_mode=False, file=sys.stdout):
     max_pid_width = max(len(str(row['pid'])) for row in data)
 
     # Print header
-    header = f"{'Total':>9} {'RSS':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'COMMAND'}"
+    header = f"{'Total':>9} {'PSS':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'COMMAND'}"
     print(bold(header, watch_mode), file=file)
 
     # Calculate fixed width for clipping
@@ -395,20 +422,21 @@ def print_processes_table(data, title=None, watch_mode=False, file=sys.stdout):
         cmdline_width = None
 
     for row in data:
-        # Include RssFile (file_bytes) as it represents the "active" file cache for the process
-        # rss_bytes already includes anon_bytes + file_bytes + shmem_bytes
-        total_bytes = row['rss_bytes'] + row['swap_bytes']
+        # PSS splits shared pages across mappers; a process whose smaps_rollup is
+        # unreadable falls back to RSS.
+        pss_bytes, pss_shmem_bytes, swap_pss_bytes = effective_proportional(row)
+        total_bytes = pss_bytes + swap_pss_bytes
         total_str = human_size(total_bytes)
-        rss_str = human_size(row['rss_bytes'])
-        shmem_str = human_size(row['shmem_bytes'])
-        swap_str = human_size(row['swap_bytes'])
+        pss_str = human_size(pss_bytes)
+        shmem_str = human_size(pss_shmem_bytes)
+        swap_str = human_size(swap_pss_bytes)
         pid_str = str(row['pid'])
         cmdline = row['cmdline']
 
         if cmdline_width and len(cmdline) > cmdline_width:
             cmdline = cmdline[:cmdline_width-3] + '...'
 
-        memory_col = bold(f"{rss_str:>9}", watch_mode)
+        memory_col = bold(f"{pss_str:>9}", watch_mode)
         print(f"{total_str:>9} {memory_col} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {cmdline}", file=file)
 
 
@@ -461,11 +489,15 @@ def show_cgroup_processes(cgroup_name, limit=10, watch_mode=False, file=sys.stdo
                     processes.append({
                         'pid': pid,
                         'cmdline': cmdline,
+                        'proportional': get_proc_proportional(pid),
                         **mem
                     })
 
-            # Sort by total usage (RSS + Swap).
-            processes.sort(key=lambda x: x['rss_bytes'] + x['swap_bytes'], reverse=True)
+            # Sort by proportional total (PSS + proportional swap), RSS on fallback.
+            def sort_key(p):
+                pss, _shmem, swap_pss = effective_proportional(p)
+                return pss + swap_pss
+            processes.sort(key=sort_key, reverse=True)
 
             # Apply limit
             if limit > 0:
