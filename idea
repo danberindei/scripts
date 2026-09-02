@@ -92,9 +92,13 @@ proj = rf"(?:{parent}/)?{name}"
 # "name [path]" label.  Two projects that share both leaf and parent names
 # (e.g. /a/work/proj and /b/work/proj) still collide; the label regex then
 # matches whichever window Switchboard lists first.
-# A project window with no file opened is titled just the project name.
 label = rf"^{proj}\s+\[[^\]]*\b{parent}\b"
 plain = rf"^{proj}\s+[-–]\s+"
+# With no file open the new UI titles the window "name branch parent/leaf",
+# the path breadcrumb ending in the project's own parent/leaf directories.
+nofile = rf"^{proj}\s+.*\b{parent}/{name}\b"
+# A window that is still opening is titled just the project name, before the
+# branch and path widgets populate.
 bare = rf"^{proj}$"
 
 subprocess.run([
@@ -102,6 +106,7 @@ subprocess.run([
     "--wm-class", "jetbrains-idea",
     "--title-regex", label,
     "--title-regex", plain,
+    "--title-regex", nofile,
     "--title-regex", bare,
     "--wait", "10",
 ])
