@@ -8,8 +8,23 @@ ESC = '\x1b'
 EOT = '\x04'  # Ctrl+D in cbreak mode
 
 
-def run_ytdlp(extra_args, url):
+def clean_url(url):
     url = url.strip()
+    # Strip matching surrounding quotes (straight, smart, angle, or backticks)
+    pairs = [('"', '"'), ("'", "'"), ('\u201c', '\u201d'), ('\u2018', '\u2019'),
+             ('<', '>'), ('`', '`')]
+    changed = True
+    while changed and len(url) >= 2:
+        changed = False
+        for left, right in pairs:
+            if url.startswith(left) and url.endswith(right):
+                url = url[1:-1].strip()
+                changed = True
+    return url
+
+
+def run_ytdlp(extra_args, url):
+    url = clean_url(url)
     if not url:
         return
     result = subprocess.run(['yt-dlp'] + extra_args + [url])
