@@ -21,6 +21,10 @@ if [[ $# -lt 1 ]]; then
 fi
 
 ref="$1"
+# Strip markdown decorations (e.g. **path:line**, `path:line`) and whitespace,
+# which commonly arrive when pasting from chat/Journal notes.
+ref="$(printf '%s' "$ref" | sed -e 's/^[[:space:]\*`]*//' -e 's/[[:space:]\*`]*$//')"
+debug "stripped_ref=$ref"
 if [[ "$ref" =~ :[0-9]+$ ]]; then
   file="${ref%:*}"
   line="${ref##*:}"
