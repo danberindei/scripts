@@ -16,6 +16,7 @@ REAL_IDEA = os.path.expanduser("~/.local/bin/idea")
 
 def parse_args(argv):
     line = None
+    column = None
     paths = []
     i = 0
     while i < len(argv):
@@ -27,14 +28,23 @@ def parse_args(argv):
             line = argv[i]
         elif arg.startswith("--line="):
             line = arg[len("--line="):]
+        elif arg in ("--column", "-c"):
+            i += 1
+            if i >= len(argv):
+                sys.exit("idea: --column requires a value")
+            column = argv[i]
+        elif arg.startswith("--column="):
+            column = arg[len("--column="):]
         elif arg.startswith("-") and arg != "-":
             sys.exit(f"idea: unknown option {arg!r}")
         else:
             paths.append(arg)
         i += 1
-    if len(paths) != 1:
-        sys.exit("idea: expected exactly one path argument")
-    return paths[0], line
+    # Mirrors the real launcher's own usage: a bare file, or a project dir
+    # followed by a file inside it (this is how Paseo's "open in editor" calls it).
+    if len(paths) not in (1, 2):
+        sys.exit("idea: expected one or two path arguments (file, or project dir + file)")
+    return paths, line, column
 
 
 def git_toplevel():
@@ -59,25 +69,41 @@ def project_root(path):
     return None
 
 
-path, line = parse_args(sys.argv[1:])
+paths, line, column = parse_args(sys.argv[1:])
 
-toplevel = git_toplevel()
-# A relative path is cwd-relative first; fall back to the git root, like
-# open-idea-fileline, then make it absolute for the launcher.
-if not os.path.isabs(path):
-    if not os.path.isfile(path) and toplevel and os.path.isfile(os.path.join(toplevel, path)):
-        path = os.path.join(toplevel, path)
-path = os.path.abspath(path)
+if len(paths) == 2:
+    # Caller already knows the project dir; skip the ancestor search below.
+    project_dir, file_path = (os.path.abspath(p) for p in paths)
+    launch_paths = [project_dir, file_path]
+    root = project_dir
+else:
+    path = paths[0]
+    toplevel = git_toplevel()
+    # A relative path is cwd-relative first; fall back to the git root, like
+    # open-idea-fileline, then make it absolute for the launcher.
+    if not os.path.isabs(path):
+        if not os.path.isfile(path) and toplevel and os.path.isfile(os.path.join(toplevel, path)):
+            path = os.path.join(toplevel, path)
+    path = os.path.abspath(path)
+
+    # A directory with no .idea of its own makes IDEA offer to create a project.
+    if os.path.isdir(path):
+        launch_path = project_root(path) or path
+    else:
+        launch_path = path
+
+    launch_paths = [launch_path]
+    # Raise the project window.  IDEA titles a window with the project directory
+    # name (the .idea ancestor), or the git root's basename when there is no .idea.
+    root = project_root(path) or toplevel
 
 real_args = [REAL_IDEA]
 if line is not None:
     real_args += ["--line", line]
-real_args.append(path)
+if column is not None:
+    real_args += ["--column", column]
+real_args += launch_paths
 launcher = subprocess.Popen(real_args)
-
-# Raise the project window.  IDEA titles a window with the project directory
-# name (the .idea ancestor), or the git root's basename when there is no .idea.
-root = project_root(path) or toplevel
 if not root:
     sys.exit(launcher.wait())
 
