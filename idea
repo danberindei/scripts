@@ -71,11 +71,31 @@ def project_root(path):
 
 paths, line, column = parse_args(sys.argv[1:])
 
+line_col = []
+if line is not None:
+    line_col += ["--line", line]
+if column is not None:
+    line_col += ["--column", column]
+
+
+def launch(args):
+    return subprocess.Popen([REAL_IDEA] + args)
+
+
+def wl_focus(regexes, wait):
+    # Returns True if a matching window was found (and raised).
+    args = ["wl-focus", "--wm-class", "jetbrains-idea"]
+    for regex in regexes:
+        args += ["--title-regex", regex]
+    args += ["--wait", str(wait)]
+    return subprocess.run(args).returncode == 0
+
+
 if len(paths) == 2:
     # Caller already knows the project dir; skip the ancestor search below.
-    project_dir, file_path = (os.path.abspath(p) for p in paths)
-    launch_paths = [project_dir, file_path]
+    project_dir, target_file = (os.path.abspath(p) for p in paths)
     root = project_dir
+    launch_paths = None
 else:
     path = paths[0]
     toplevel = git_toplevel()
@@ -86,26 +106,26 @@ else:
             path = os.path.join(toplevel, path)
     path = os.path.abspath(path)
 
+    if not os.path.isdir(path):
+        # A single file opens in LightEdit: a standalone editor with no project,
+        # so the file always lands in it rather than in whatever project frame is
+        # frontmost.  Its window shares wm_class with project windows; the title
+        # leads with the basename and an ASCII hyphen, where project windows lead
+        # with the project name and an en-dash.
+        rc = launch(["-e"] + line_col + [path]).wait()
+        basename = re.escape(os.path.basename(path))
+        wl_focus((rf"^{basename}\s+-\s", rf"^{basename}\b"), 10)
+        sys.exit(rc)
+
     # A directory with no .idea of its own makes IDEA offer to create a project.
-    if os.path.isdir(path):
-        launch_path = project_root(path) or path
-    else:
-        launch_path = path
-
-    launch_paths = [launch_path]
-    # Raise the project window.  IDEA titles a window with the project directory
-    # name (the .idea ancestor), or the git root's basename when there is no .idea.
     root = project_root(path) or toplevel
+    launch_paths = [project_root(path) or path]
+    target_file = None
 
-real_args = [REAL_IDEA]
-if line is not None:
-    real_args += ["--line", line]
-if column is not None:
-    real_args += ["--column", column]
-real_args += launch_paths
-launcher = subprocess.Popen(real_args)
+# Without an owning project there is no window to raise deterministically: open
+# the paths as given and let the launcher place them.
 if not root:
-    sys.exit(launcher.wait())
+    sys.exit(launch(launch_paths).wait())
 
 abs_root = os.path.abspath(root)
 name = re.escape(os.path.basename(abs_root))
@@ -126,15 +146,34 @@ nofile = rf"^{proj}\s+.*\b{parent}/{name}\b"
 # A window that is still opening is titled just the project name, before the
 # branch and path widgets populate.
 bare = rf"^{proj}$"
+# The owning project's window once it holds the target file.  The path in the
+# title may be truncated with an ellipsis but keeps the file's basename.
+in_project_file = rf"^{proj}\b.*{re.escape(os.path.basename(target_file))}" if target_file else None
+# The project is populated (its branch/path widgets are up) once the title takes
+# any form other than the bare name; the bare form is only the loading state.
+populated = (label, plain, nofile)
 
-subprocess.run([
-    "wl-focus",
-    "--wm-class", "jetbrains-idea",
-    "--title-regex", label,
-    "--title-regex", plain,
-    "--title-regex", nofile,
-    "--title-regex", bare,
-    "--wait", "10",
-])
+# A directory or project-only target: open it and raise it.
+if target_file is None:
+    rc = launch(launch_paths).wait()
+    wl_focus((label, plain, nofile, bare), 10)
+    sys.exit(rc)
 
-sys.exit(launcher.wait())
+# IDEA routes a file to an already-open project whose content contains it, but
+# falls back to the last-focused frame when that project is closed.  Open the
+# owning project first and wait until it is populated (not just its bare loading
+# title) so the file lands in it rather than whatever frame is frontmost.
+if not wl_focus(populated, 0):
+    launch([abs_root])
+    wl_focus(populated, 30)
+
+# A file opened right as the project finishes loading can still lose the routing
+# race and land in the last-focused frame; retry until the project's own window
+# shows the file.
+rc = 0
+for _ in range(3):
+    rc = launch(line_col + [target_file]).wait()
+    if wl_focus((in_project_file,), 10):
+        sys.exit(rc)
+wl_focus((label, plain, nofile, bare), 5)
+sys.exit(rc)
