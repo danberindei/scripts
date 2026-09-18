@@ -25,9 +25,11 @@ ref="$1"
 # which commonly arrive when pasting from chat/Journal notes.
 ref="$(printf '%s' "$ref" | sed -e 's/^[[:space:]\*`]*//' -e 's/[[:space:]\*`]*$//')"
 debug "stripped_ref=$ref"
-if [[ "$ref" =~ :[0-9]+$ ]]; then
+if [[ "$ref" =~ :[0-9]+(-[0-9]+)?$ ]]; then
   file="${ref%:*}"
   line="${ref##*:}"
+  # idea --line takes a single line; keep the range start.
+  line="${line%%-*}"
 else
   file="$ref"
   line=""
