@@ -14,6 +14,7 @@ USAGE = """Usage: idea-jira <ISSUE-KEY> [BRANCH] [--dry-run]
   Creates or reuses a git branch, IDEA task, and IDEA changelist for a Jira issue
   If BRANCH is omitted, reuses an existing branch (from git or the IDEA task);
   fails if none can be resolved - pass BRANCH to create a new one
+  A new branch starts from the local main or master branch, not from HEAD
   --dry-run reports what would be done without making any changes"""
 
 PROTECTED_BRANCHES = {"main", "master", "HEAD"}
@@ -208,6 +209,21 @@ def branch_from_task(issue: str, task: dict | None, git_roots: list[Path]) -> st
     )
 
 
+def base_branch(branch: str, cwd: Path | None = None) -> str:
+    # both main and master can exist locally; origin/HEAD says which one the remote uses
+    origin_head = run_command(
+        ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        check=False,
+        cwd=cwd,
+    ).stdout.strip()
+    candidates = [origin_head.split("/", 1)[1]] if "/" in origin_head else []
+    candidates += ["main", "master"]
+    for name in candidates:
+        if branch_exists(name, [cwd]):
+            return name
+    raise RuntimeError(f"no local main or master branch to start '{branch}' from")
+
+
 def ensure_branch(branch: str, cwd: Path | None = None) -> tuple[str, bool]:
     current = command_output(["git", "branch", "--show-current"], cwd=cwd).strip()
     if current == branch:
@@ -225,7 +241,7 @@ def ensure_branch(branch: str, cwd: Path | None = None) -> tuple[str, bool]:
         run_command(["git", "checkout", branch], capture_output=False, cwd=cwd)
         return branch, True
 
-    run_command(["git", "checkout", "-b", branch], capture_output=False, cwd=cwd)
+    run_command(["git", "checkout", "-b", branch, base_branch(branch, cwd=cwd)], capture_output=False, cwd=cwd)
     return branch, False
 
 
@@ -412,6 +428,9 @@ def main(argv: list[str]) -> int:
             stdout = (exc.stdout or "").strip()
             detail = stderr or stdout or str(exc)
             print(f"Note: could not create branch '{branch}' in {git_root}: {detail}", file=sys.stderr)
+            failed_git_roots.append(git_root)
+        except RuntimeError as exc:
+            print(f"Note: could not create branch '{branch}' in {git_root}: {exc}", file=sys.stderr)
             failed_git_roots.append(git_root)
 
     try:
