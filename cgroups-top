@@ -69,7 +69,7 @@ def get_proc_cmdline(pid):
         cmdline = Path(f"/proc/{pid}/cmdline").read_text()
         if cmdline:
             return ' '.join(cmdline.split('\x00')).strip()
-        return get_proc_comm(pid)
+        return None
     except (FileNotFoundError, PermissionError, ProcessLookupError):
         return None
 
@@ -222,34 +222,39 @@ def get_synthetic_entries():
 
 
 def iter_cgroup_dirs(root="/sys/fs/cgroup"):
-    for parent, directories, _files in os.walk(root):
-        for name in directories:
-            yield Path(parent) / name
+    """Yield each cgroup directory with its file names, excluding the root."""
+    root_path = Path(root)
+    for parent, _directories, files in os.walk(root):
+        if Path(parent) == root_path:
+            continue
+        yield Path(parent), files
 
 
 def collect_cgroup_data():
     """Collect cgroup memory and process data."""
     results = []
 
-    for cgroup_dir in iter_cgroup_dirs():
+    for cgroup_dir, files in iter_cgroup_dirs():
+        if not {'memory.current', 'memory.stat', 'cgroup.procs'} <= set(files):
+            continue
+
         memory_file = cgroup_dir / "memory.current"
         swap_file = cgroup_dir / "memory.swap.current"
         stat_file = cgroup_dir / "memory.stat"
         procs_file = cgroup_dir / "cgroup.procs"
 
-        if not (memory_file.exists() and procs_file.exists()):
-            continue
-
         try:
-            # Extract shmem and inactive_file from memory.stat
+            pids = [int(p) for p in procs_file.read_text().strip().split('\n') if p]
+            if not pids:
+                continue
+
             shmem_bytes = 0
             inactive_file_bytes = 0
-            if stat_file.exists():
-                for line in stat_file.read_text().split('\n'):
-                    if line.startswith('shmem '):
-                        shmem_bytes = int(line.split()[1])
-                    elif line.startswith('inactive_file '):
-                        inactive_file_bytes = int(line.split()[1])
+            for line in stat_file.read_text().split('\n'):
+                if line.startswith('shmem '):
+                    shmem_bytes = int(line.split()[1])
+                elif line.startswith('inactive_file '):
+                    inactive_file_bytes = int(line.split()[1])
 
             memory_bytes = int(memory_file.read_text().strip())
             # Don't include inactive file cache in the cgroup total
@@ -258,37 +263,29 @@ def collect_cgroup_data():
             # total and in the synthetic [tmpfs] entry, which is intentional so per-cgroup
             # shmem usage remains visible.
 
-            swap_bytes = int(swap_file.read_text().strip()) if swap_file.exists() else 0
-
-            pids = [int(p) for p in procs_file.read_text().strip().split('\n') if p]
-            if not pids:
-                continue
+            swap_bytes = int(swap_file.read_text().strip()) if 'memory.swap.current' in files else 0
 
             root_pid = pids[0]
 
-            # Get distinct executable names
             exes = set()
+            processes = []
             for pid in pids:
                 comm = get_proc_comm(pid)
                 if comm:
                     exes.add(comm)
-
-            # Collect per-process memory totals for this cgroup
-            processes = []
-            for pid in pids:
-                cmdline = get_proc_cmdline(pid) or get_proc_comm(pid) or ''
+                cmdline = get_proc_cmdline(pid) or comm or ''
                 mem = get_proc_memory(pid)
                 # Include RssFile (file_bytes) as it represents the "active" file cache for the process
                 # rss_bytes already includes anon_bytes + file_bytes + shmem_bytes
                 total = mem['rss_bytes'] + mem['swap_bytes']
                 processes.append({
                     'pid': pid,
+                    'comm': comm,
                     'cmdline': cmdline,
                     **mem,
                     'total_bytes': total
                 })
 
-            # Sort processes by total memory usage descending
             processes.sort(key=lambda x: x['total_bytes'], reverse=True)
 
             service_name = cgroup_dir.name[:40]
@@ -360,18 +357,14 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
         # per executable avoids the double-counting that summing RSS would introduce.
         exe_proportional = {}
         for p in (row.get('processes') or []):
-            try:
-                comm = get_proc_comm(p['pid']) or ''
-            except Exception:
-                comm = ''
+            comm = p.get('comm') or ''
             if not comm:
                 # fallback to first token of cmdline
                 cmd = p.get('cmdline') or ''
                 comm = cmd.split(' ')[0] if cmd else ''
 
-            if 'proportional' not in p:
-                p['proportional'] = get_proc_proportional(p['pid'])
-            pss, _pss_shmem, swap_pss = effective_proportional(p)
+            proportional = get_proc_proportional(p['pid'])
+            pss, _pss_shmem, swap_pss = effective_proportional({**p, 'proportional': proportional})
             exe_proportional[comm] = exe_proportional.get(comm, 0) + pss + swap_pss
 
         exe_items = list(exe_proportional.items())
@@ -454,27 +447,26 @@ def print_jsonl(data, include_processes=False, file=sys.stdout):
             exe = exes[0]
         output['exe'] = exe
         if include_processes:
-            output['processes'] = []
-            for pid in row['pids']:
-                mem = get_proc_memory(pid)
-                output['processes'].append({
-                    'pid': pid,
-                    'comm': get_proc_comm(pid),
-                    **mem
-                })
+            process_fields = ('pid', 'comm', 'rss_bytes', 'file_bytes', 'anon_bytes', 'swap_bytes', 'shmem_bytes')
+            output['processes'] = [
+                {key: p[key] for key in process_fields}
+                for p in row['processes']
+            ]
+        else:
+            output['processes'] = [
+                {key: value for key, value in p.items() if key != 'comm'}
+                for p in row['processes']
+            ]
         print(json.dumps(output), file=file)
 
 
 def show_cgroup_processes(cgroup_name, limit=10, watch_mode=False, file=sys.stdout):
     """Show individual process memory usage for a specific cgroup."""
-    for cgroup_dir in iter_cgroup_dirs():
+    for cgroup_dir, _files in iter_cgroup_dirs():
         if cgroup_dir.name != cgroup_name:
             continue
 
         procs_file = cgroup_dir / "cgroup.procs"
-        if not procs_file.exists():
-            continue
-
         try:
             pids = [int(p) for p in procs_file.read_text().strip().split('\n') if p]
             if not pids:
@@ -483,7 +475,7 @@ def show_cgroup_processes(cgroup_name, limit=10, watch_mode=False, file=sys.stdo
             # Collect process data
             processes = []
             for pid in pids:
-                cmdline = get_proc_cmdline(pid)
+                cmdline = get_proc_cmdline(pid) or get_proc_comm(pid)
                 mem = get_proc_memory(pid)
                 if cmdline:
                     processes.append({
