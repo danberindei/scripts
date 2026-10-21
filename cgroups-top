@@ -221,14 +221,17 @@ def get_synthetic_entries():
     ]
 
 
+def iter_cgroup_dirs(root="/sys/fs/cgroup"):
+    for parent, directories, _files in os.walk(root):
+        for name in directories:
+            yield Path(parent) / name
+
+
 def collect_cgroup_data():
     """Collect cgroup memory and process data."""
     results = []
 
-    for cgroup_dir in Path("/sys/fs/cgroup").rglob("*"):
-        if not cgroup_dir.is_dir():
-            continue
-
+    for cgroup_dir in iter_cgroup_dirs():
         memory_file = cgroup_dir / "memory.current"
         swap_file = cgroup_dir / "memory.swap.current"
         stat_file = cgroup_dir / "memory.stat"
@@ -464,10 +467,7 @@ def print_jsonl(data, include_processes=False, file=sys.stdout):
 
 def show_cgroup_processes(cgroup_name, limit=10, watch_mode=False, file=sys.stdout):
     """Show individual process memory usage for a specific cgroup."""
-    for cgroup_dir in Path("/sys/fs/cgroup").rglob("*"):
-        if not cgroup_dir.is_dir():
-            continue
-
+    for cgroup_dir in iter_cgroup_dirs():
         if cgroup_dir.name != cgroup_name:
             continue
 
