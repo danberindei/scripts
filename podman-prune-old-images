@@ -3,14 +3,17 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: podman-prune-old-images [--apply]
+Usage: podman-prune-old-images [--apply] [--max-age DAYS]
 
-Keep only the newest podman image per repository.
+Keep only the newest podman image per repository, then remove tagged images
+older than DAYS days with no container-create event in the retained journal,
+then remove untagged images.
 Default mode is dry-run (prints what would be removed).
 
 Options:
-  --apply   Remove old image tags instead of only printing them
-  -h, --help  Show this help
+  --apply         Remove images instead of only printing them
+  --max-age DAYS  Age threshold for tagged images (default: 90)
+  -h, --help      Show this help
 EOF
 }
 
@@ -22,10 +25,32 @@ require_cmd() {
 }
 
 apply=0
+max_age=90
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --apply)
       apply=1
+      ;;
+    --max-age)
+      if [ "$#" -lt 2 ]; then
+        printf 'Missing value for --max-age.\n\n' >&2
+        usage >&2
+        exit 2
+      fi
+      shift
+      case "$1" in
+        ''|*[!0-9]*)
+          printf 'Invalid --max-age value: %s\n\n' "$1" >&2
+          usage >&2
+          exit 2
+          ;;
+      esac
+      if [ "$1" -lt 1 ]; then
+        printf 'Invalid --max-age value: %s\n\n' "$1" >&2
+        usage >&2
+        exit 2
+      fi
+      max_age=$((10#$1))
       ;;
     -h|--help)
       usage
@@ -47,6 +72,10 @@ short_id() {
   local raw="$1"
   raw="${raw#sha256:}"
   printf '%s' "${raw:0:12}"
+}
+
+dangling_ids() {
+  podman images -f dangling=true --format '{{.ID}}'
 }
 
 selection_filter='
@@ -76,28 +105,151 @@ selection_filter='
 tmp_file="$(mktemp)"
 trap 'rm -f "$tmp_file"' EXIT
 
-podman images --format json \
+original_images_json="$(podman images --format json)"
+printf '%s' "$original_images_json" \
   | jq -r "$selection_filter" > "$tmp_file"
+tag_count="$(grep -c . "$tmp_file" || true)"
 
-if [ ! -s "$tmp_file" ]; then
-  printf 'No old images found. Nothing to do.\n'
-  exit 0
+if ! create_events="$(journalctl --user PODMAN_EVENT=create -o json --output-fields=PODMAN_IMAGE \
+  | jq -r 'select(.PODMAN_IMAGE != null) | [.PODMAN_IMAGE, .__REALTIME_TIMESTAMP] | @tsv')"; then
+  printf 'Cannot query container-create events; aborting image pruning.\n' >&2
+  exit 1
 fi
 
-if [ "$apply" -eq 0 ]; then
+# PODMAN_EVENT=create entries carry no image ID, only PODMAN_IMAGE: the name the
+# container was created from. Match names before removing any aliases.
+declare -A last_use=()
+while IFS="$(printf '\t')" read -r image_name timestamp; do
+  [ -n "$image_name" ] || continue
+  previous="${last_use[$image_name]:-0}"
+  if [ "$timestamp" -gt "$previous" ]; then
+    last_use["$image_name"]="$timestamp"
+  fi
+done <<< "$create_events"
+
+declare -A image_used=()
+while IFS="$(printf '\t')" read -r id image_name; do
+  [ -n "$image_name" ] || continue
+  if [ -n "${last_use[$image_name]:-}" ]; then
+    image_used["$id"]=1
+  fi
+done < <(printf '%s' "$original_images_json" \
+  | jq -r '.[] | .Id as $id | (.Names // [])[] | [$id, .] | @tsv')
+
+if [ ! -s "$tmp_file" ]; then
+  printf 'No old image tags to remove.\n'
+elif [ "$apply" -eq 0 ]; then
   printf 'Dry run. Old image tags that would be removed:\n'
   while IFS="$(printf '\t')" read -r repo tag id created_at; do
     printf '%s:%s\t%s\t%s\n' "$repo" "$tag" "$(short_id "$id")" "$created_at"
   done < "$tmp_file"
-  printf '\nRun with --apply to remove them.\n'
-  exit 0
+else
+  printf 'Removing old image tags:\n'
+  while IFS="$(printf '\t')" read -r repo tag id created_at; do
+    ref="${repo}:${tag}"
+    printf '  %s (%s)\n' "$ref" "$(short_id "$id")"
+    podman rmi "$ref"
+  done < "$tmp_file"
 fi
 
-printf 'Removing old image tags:\n'
-while IFS="$(printf '\t')" read -r repo tag id created_at; do
-  ref="${repo}:${tag}"
-  printf '  %s (%s)\n' "$ref" "$(short_id "$id")"
-  podman rmi "$ref"
-done < "$tmp_file"
+window_start_us="$(journalctl --user --list-boots -o json | jq -r '[.[].first_entry] | min // 0')"
+window_start_date="the start of the retained journal"
+if [ "$window_start_us" -gt 0 ]; then
+  window_start_date="$(date -d "@$((window_start_us / 1000000))" '+%Y-%m-%d')"
+fi
 
-printf 'Done.\n'
+declare -A image_in_use=()
+while IFS= read -r container_image; do
+  [ -n "$container_image" ] || continue
+  image_in_use["$(short_id "$container_image")"]=1
+done < <( { podman ps -a --format '{{.ImageID}}'; podman ps -a --external --format '{{.ImageID}}'; } )
+
+images_json="$(podman images -a --format json)"
+size_upper_bound="$(printf '%s' "$images_json" | jq '[.[].Size] | add // 0')"
+now="$(date +%s)"
+age_cutoff=$((now - max_age * 86400))
+
+: > "$tmp_file"
+while IFS="$(printf '\t')" read -r id created names; do
+  [ "$created" -lt "$age_cutoff" ] || continue
+  [ -z "${image_used[$id]:-}" ] || continue
+  candidate=1
+  IFS=',' read -r -a image_names <<< "$names"
+  for image_name in "${image_names[@]}"; do
+    if [ -n "${last_use[$image_name]:-}" ]; then
+      candidate=0
+      break
+    fi
+  done
+  [ "$candidate" -eq 1 ] || continue
+  if [ -n "${image_in_use["$(short_id "$id")"]:-}" ]; then
+    continue
+  fi
+  printf '%s\t%s\t%s\n' "$id" "$created" "$names" >> "$tmp_file"
+done < <(printf '%s' "$images_json" \
+  | jq -r '.[] | select((.Names // []) | length > 0) | [.Id, (.Created // 0), (.Names | join(","))] | @tsv')
+age_count="$(grep -c . "$tmp_file" || true)"
+
+printf '\n'
+if [ ! -s "$tmp_file" ]; then
+  printf 'No tagged images older than %s days without a container-create event since %s.\n' \
+    "$max_age" "$window_start_date"
+elif [ "$apply" -eq 0 ]; then
+  printf 'Dry run. Tagged images older than %s days without a container-create event since %s:\n' \
+    "$max_age" "$window_start_date"
+  while IFS="$(printf '\t')" read -r id created image_name; do
+    printf '%s\t%s\t%s\tno create event since %s\n' \
+      "$(short_id "$id")" "$image_name" "$(date -d "@$created" '+%Y-%m-%d')" "$window_start_date"
+  done < "$tmp_file"
+else
+  printf 'Removing tagged images older than %s days without a container-create event since %s:\n' \
+    "$max_age" "$window_start_date"
+  while IFS="$(printf '\t')" read -r id created names; do
+    IFS=',' read -r -a image_names <<< "$names"
+    for image_name in "${image_names[@]}"; do
+      printf '  %s (%s)\n' "$image_name" "$(short_id "$id")"
+      podman rmi "$image_name"
+    done
+  done < "$tmp_file"
+fi
+
+untagged_count=0
+printf '\n'
+if [ "$apply" -eq 0 ]; then
+  dangling_list="$(dangling_ids)"
+  untagged_count="$(printf '%s\n' "$dangling_list" | grep -c . || true)"
+  printf 'Dry run. Untagged images that would be pruned (podman image prune --force):\n'
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    printf '  %s\n' "$id"
+  done <<< "$dangling_list"
+  printf '%s dangling image(s). Size sum of all local images is %s bytes; that is an upper bound, since shared layers are not freed.\n' \
+    "$untagged_count" "$size_upper_bound"
+else
+  printf 'Removing untagged images (podman image prune --force):\n'
+  iteration=0
+  while [ "$iteration" -lt 10 ]; do
+    iteration=$((iteration + 1))
+    before_ids="$(dangling_ids | sort)"
+    # -a is deliberately absent: it also removes tagged images, which this pass
+    # must not touch.
+    podman image prune --force
+    after_ids="$(dangling_ids | sort)"
+    removed="$(comm -23 <(printf '%s\n' "$before_ids") <(printf '%s\n' "$after_ids") | grep -c . || true)"
+    printf 'Iteration %s: %s untagged image(s) removed.\n' "$iteration" "$removed"
+    untagged_count=$((untagged_count + removed))
+    [ "$removed" -gt 0 ] || break
+  done
+fi
+
+total=$((tag_count + age_count + untagged_count))
+printf '\n'
+if [ "$apply" -eq 0 ]; then
+  printf 'Summary: %s old tag(s), %s aged image(s), %s untagged image(s) would be removed (%s total).\n' \
+    "$tag_count" "$age_count" "$untagged_count" "$total"
+  printf '\nRun with --apply to remove them.\n'
+else
+  printf 'Summary: %s old tag(s), %s aged image(s), %s untagged image(s) removed (%s total).\n' \
+    "$tag_count" "$age_count" "$untagged_count" "$total"
+  printf '\nDone.\n'
+fi
