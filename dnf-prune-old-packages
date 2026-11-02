@@ -1,0 +1,135 @@
+#!/usr/bin/python3
+"""Remove old cached RPMs, keeping the newest cached version for removed packages."""
+
+import argparse
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import stat
+import sys
+
+import rpm
+
+
+DEFAULT_CACHE_DIRS = (Path('/var/cache/libdnf5'), Path('/var/cache/dnf'))
+
+
+@dataclass(frozen=True)
+class Candidate:
+    path: Path
+    snapshot: os.stat_result
+
+
+def evr(header):
+    return (str(header['epoch'] or 0), header['version'], header['release'])
+
+
+def newest_versions(headers):
+    versions = {}
+    for header in headers:
+        key = (header['name'], header['arch'])
+        version = evr(header)
+        if key not in versions or rpm.labelCompare(version, versions[key]) > 0:
+            versions[key] = version
+    return versions
+
+
+def older_than_reference(header, versions):
+    version = versions.get((header['name'], header['arch']))
+    return version is not None and rpm.labelCompare(evr(header), version) < 0
+
+
+def read_header(transaction, path):
+    with path.open('rb') as package:
+        return transaction.hdrFromFdno(package.fileno())
+
+
+def raise_walk_error(error):
+    raise error
+
+
+def find_candidates(transaction, installed, roots=DEFAULT_CACHE_DIRS):
+    """Read all cache metadata before allowing any deletion; ignore symlinks."""
+    cached = []
+    for root in roots:
+        try:
+            root_stat = root.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise ValueError(f'Cache root is not a directory: {root}')
+        for directory, _, filenames in os.walk(root, onerror=raise_walk_error):
+            for filename in sorted(filenames):
+                if not filename.endswith('.rpm'):
+                    continue
+                path = Path(directory) / filename
+                snapshot = path.lstat()
+                if not stat.S_ISREG(snapshot.st_mode):
+                    continue
+                try:
+                    header = read_header(transaction, path)
+                except (OSError, rpm.error) as error:
+                    raise ValueError(f'Cannot read RPM {path}: {error}') from error
+                cached.append((Candidate(path, snapshot), header))
+    versions = newest_versions(header for _, header in cached)
+    # Installed versions take precedence even when a newer RPM is cached.
+    versions.update(installed)
+    candidates = [candidate for candidate, header in cached
+                  if older_than_reference(header, versions)]
+    return sorted(candidates, key=lambda candidate: candidate.path)
+
+
+def file_identity(snapshot):
+    return (snapshot.st_dev, snapshot.st_ino, snapshot.st_mode,
+            snapshot.st_size, snapshot.st_mtime_ns, snapshot.st_ctime_ns)
+
+
+def remove_candidates(candidates):
+    """Abort if any candidate changed after inspection, before removing files."""
+    for candidate in candidates:
+        if file_identity(candidate.path.lstat()) != file_identity(candidate.snapshot):
+            raise ValueError(f'Cached RPM changed during inspection: {candidate.path}')
+    for candidate in candidates:
+        candidate.path.unlink()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog='Scans /var/cache/libdnf5 and /var/cache/dnf. '
+               'For installed packages, keeps cached versions equal to or newer '
+               'than the newest installed version. For packages with no installed '
+               'match, keeps the newest cached version across both caches. '
+               'Comparisons use matching package name and architecture. '
+               'Paths go to stdout; summaries go to stderr. '
+               'Requires the system Python RPM bindings (python3-rpm). '
+               'Run while no package transaction or cache download is active.')
+    parser.add_argument('--apply', action='store_true',
+                        help='delete matching RPMs; default is a dry run')
+    args = parser.parse_args(argv)
+
+    try:
+        transaction = rpm.TransactionSet()
+        # Cache inspection needs metadata, including RPMs signed by retired keys.
+        transaction.setVSFlags(rpm.RPMVSF_MASK_NOSIGNATURES)
+        installed = newest_versions(transaction.dbMatch())
+        if not installed:
+            raise ValueError('Installed RPM database is empty; refusing to prune')
+        candidates = find_candidates(transaction, installed)
+        size = sum(candidate.snapshot.st_size for candidate in candidates)
+        for candidate in candidates:
+            print(candidate.path)
+        sys.stdout.flush()
+        if args.apply:
+            remove_candidates(candidates)
+        action = 'Deleted' if args.apply else 'Would delete'
+        print(f'{action} {len(candidates)} cached RPMs, '
+              f'{size / 1024 ** 3:.2f} GiB ({size} bytes).', file=sys.stderr)
+        return 0
+    except (OSError, ValueError, rpm.error) as error:
+        print(f'Error: {error}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
