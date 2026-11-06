@@ -6,11 +6,16 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
-import time
 from pathlib import Path
 
+from top_common import (
+    WatchDisplay,
+    human_size,
+    nonnegative_limit,
+    positive_interval,
+    read_cgroup_memory,
+)
 
 BOLD = "\033[1m"
 BOLD_RESET = "\033[22m"
@@ -20,18 +25,12 @@ RED = "\033[31m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 
-
-def human_size(bytes_val):
-    """Convert bytes to human-readable format."""
-    for unit in ['B', 'KiB', 'MiB', 'GiB', 'TiB']:
-        if bytes_val < 1024.0:
-            if bytes_val >= 100:
-                return f"{bytes_val:.0f}{unit}"
-            return f"{bytes_val:.1f}{unit}"
-        bytes_val /= 1024.0
-    if bytes_val >= 100:
-        return f"{bytes_val:.0f}PiB"
-    return f"{bytes_val:.1f}PiB"
+CGROUPS_LEGEND = (
+    'App/service Memory = cgroup RAM minus inactive file cache.',
+    'Includes active file cache and kernel memory; neither is shown separately.',
+    'App/service Total = Memory + Swap; Shmem is part of Memory.',
+    'Executables: PSS + proportional swap (RSS fallback), not cgroup totals.',
+)
 
 
 def bold(text, enabled=False):
@@ -230,42 +229,125 @@ def iter_cgroup_dirs(root="/sys/fs/cgroup"):
         yield Path(parent), files
 
 
-def collect_cgroup_data():
-    """Collect cgroup memory and process data."""
-    results = []
+def cgroup_display_name(name):
+    """Remove unit naming scaffolding while preserving the full unit as its ID."""
+    if name.startswith('app-') and name.endswith('.slice'):
+        name = name[4:-6]
+    elif name.endswith('.scope'):
+        name = re.sub(r'-\d+$', '', name[:-6])
+        name = re.sub(r'^app-(?:gnome-|glib-)?', '', name)
+    return re.sub(r'\\x([0-9a-fA-F]{2})', lambda match: chr(int(match[1], 16)), name)
 
-    for cgroup_dir, files in iter_cgroup_dirs():
-        if not {'memory.current', 'memory.stat', 'cgroup.procs'} <= set(files):
+
+def cgroup_group_root(directory, entries):
+    """Select an app slice or enclosing service/scope for a populated cgroup."""
+    ancestors = [path for path in reversed(directory.parents) if path in entries] + [directory]
+    app_slices = [path for path in ancestors if path.name.startswith('app-') and path.name.endswith('.slice')]
+    if app_slices:
+        return app_slices[0]
+    for path in ancestors:
+        if path.name.endswith(('.service', '.scope')) and not re.fullmatch(r'user@\d+\.service', path.name):
+            return path
+    return directory
+
+
+def embedded_browser_owner(pid):
+    """Return JCEF's parent PID without treating Chromium's app ID as ownership."""
+    try:
+        process = Path(f'/proc/{pid}')
+        if (process / 'exe').readlink().name != 'cef_server':
+            return None
+        for line in (process / 'status').read_text().splitlines():
+            if line.startswith('PPid:'):
+                return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def attribute_embedded_browsers(directory_pids, groups, usages):
+    """Transfer detached JCEF scope counters and processes to their launching app.
+
+    Chromium and JCEF register the same app ID. A scope already included in
+    an app slice must be subtracted before its counters are added elsewhere.
+    These are display assignments; this function does not move host processes.
+    """
+    pid_roots = {pid: root for root, pids in groups.items() for pid in pids}
+    included = {}
+    excluded = {}
+    for directory, members in directory_pids.items():
+        match = re.fullmatch(r'app-org\.chromium\.Chromium(?:\.[a-z]+)?-(\d+)\.scope', directory.name)
+        if not match:
             continue
-
-        memory_file = cgroup_dir / "memory.current"
-        swap_file = cgroup_dir / "memory.swap.current"
-        stat_file = cgroup_dir / "memory.stat"
-        procs_file = cgroup_dir / "cgroup.procs"
-
+        pid = int(match[1])
+        if pid not in members:
+            continue
+        parent_pid = embedded_browser_owner(pid)
+        source = pid_roots.get(pid)
+        target = pid_roots.get(parent_pid)
+        if source is None or target is None or source == target:
+            continue
         try:
-            pids = [int(p) for p in procs_file.read_text().strip().split('\n') if p]
-            if not pids:
+            branch_usage = read_cgroup_memory(directory)
+        except (OSError, ValueError):
+            continue
+        if source not in usages or target not in usages:
+            continue
+        branch_pids = set().union(*(pids for path, pids in directory_pids.items()
+                                   if path == directory or directory in path.parents))
+        if source == directory:
+            branch_usage = usages[source]
+            groups.pop(source)
+            usages.pop(source)
+        else:
+            for key, value in branch_usage.items():
+                # The parent and child counters can change between reads.
+                branch_usage[key] = min(value, usages[source][key])
+                usages[source][key] -= branch_usage[key]
+            groups[source].difference_update(branch_pids)
+            excluded.setdefault(source, []).append(str(directory))
+        for key, value in branch_usage.items():
+            usages[target][key] += value
+        groups[target].update(branch_pids)
+        included.setdefault(target, []).append(str(directory))
+    return included, excluded
+
+
+def collect_cgroup_data():
+    """Collect nonoverlapping app and service subtrees using parent counters."""
+    results = []
+    required = {'memory.current', 'memory.stat', 'cgroup.procs'}
+    entries = {directory: set(files) for directory, files in iter_cgroup_dirs()}
+    entries = {directory: files for directory, files in entries.items() if required <= files}
+    groups = {}
+    directory_pids = {}
+    for directory in entries:
+        try:
+            pids = {int(pid) for pid in (directory / 'cgroup.procs').read_text().split()}
+        except (OSError, ValueError):
+            continue
+        if pids:
+            directory_pids[directory] = pids
+            root = cgroup_group_root(directory, entries)
+            groups.setdefault(root, set()).update(pids)
+
+    usages = {}
+    for directory in groups:
+        try:
+            usages[directory] = read_cgroup_memory(directory)
+        except (OSError, ValueError):
+            continue
+    included, excluded = attribute_embedded_browsers(directory_pids, groups, usages)
+
+    for cgroup_dir, members in groups.items():
+        if cgroup_dir not in usages:
+            continue
+        try:
+            usage = usages[cgroup_dir]
+            if not members and not any(usage.values()):
                 continue
-
-            shmem_bytes = 0
-            inactive_file_bytes = 0
-            for line in stat_file.read_text().split('\n'):
-                if line.startswith('shmem '):
-                    shmem_bytes = int(line.split()[1])
-                elif line.startswith('inactive_file '):
-                    inactive_file_bytes = int(line.split()[1])
-
-            memory_bytes = int(memory_file.read_text().strip())
-            # Don't include inactive file cache in the cgroup total
-            memory_bytes -= inactive_file_bytes
-            # Note: shmem_bytes is not subtracted here; it's counted both in this cgroup's
-            # total and in the synthetic [tmpfs] entry, which is intentional so per-cgroup
-            # shmem usage remains visible.
-
-            swap_bytes = int(swap_file.read_text().strip()) if 'memory.swap.current' in files else 0
-
-            root_pid = pids[0]
+            pids = sorted(members)
+            root_pid = pids[0] if pids else None
 
             exes = set()
             processes = []
@@ -275,7 +357,6 @@ def collect_cgroup_data():
                     exes.add(comm)
                 cmdline = get_proc_cmdline(pid) or comm or ''
                 mem = get_proc_memory(pid)
-                # Include RssFile (file_bytes) as it represents the "active" file cache for the process
                 # rss_bytes already includes anon_bytes + file_bytes + shmem_bytes
                 total = mem['rss_bytes'] + mem['swap_bytes']
                 processes.append({
@@ -288,21 +369,21 @@ def collect_cgroup_data():
 
             processes.sort(key=lambda x: x['total_bytes'], reverse=True)
 
-            service_name = cgroup_dir.name[:40]
-
             results.append({
-                'memory_bytes': memory_bytes,
-                'swap_bytes': swap_bytes,
-                'shmem_bytes': shmem_bytes,
+                **usage,
                 'root_pid': root_pid,
-                'service': service_name,
+                'service': cgroup_dir.name,
+                'name': cgroup_display_name(cgroup_dir.name),
+                'process_count': len(pids),
                 'executables': sorted(exes),
                 'processes': processes,
                 'cgroup_path': str(cgroup_dir),
+                'included_cgroup_paths': included.get(cgroup_dir, []),
+                'excluded_cgroup_paths': excluded.get(cgroup_dir, []),
                 'pids': pids
             })
 
-        except (FileNotFoundError, ValueError, PermissionError):
+        except (OSError, ValueError):
             continue
 
     # Sort by total usage (memory + swap).
@@ -329,14 +410,15 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
     is_tty, terminal_width = get_terminal_width()
 
     # Calculate max widths
-    max_pid_width = max(len(str(row['root_pid'])) if row['root_pid'] is not None else 0 for row in data)
+    max_pid_width = max(3, max(len(str(row['root_pid'])) if row['root_pid'] is not None else 0 for row in data))
+    name_width = max(11, max(len(row.get('name', row['service'])) for row in data))
 
     # Print header
-    header = f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Service':40} {'Executables (PSS)'}"
+    header = f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} {'PID':>{max_pid_width}} {'Procs':>5} {'App/Service':{name_width}} {'Executables (PSS+Swap)'}"
     print(bold(header, watch_mode), file=file)
 
     # Calculate fixed width for clipping. Executables column will include per-executable memory totals.
-    fixed_width = 9 + 1 + 9 + 1 + 9 + 1 + 9 + 1 + max_pid_width + 1 + 40 + 1
+    fixed_width = 40 + max_pid_width + 1 + 6 + name_width + 1
     if is_tty:
         exes_width = max(20, terminal_width - fixed_width)
     else:
@@ -351,6 +433,8 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
         swap_str = human_size(row['swap_bytes']) if row['swap_bytes'] is not None else ''
         pid_str = str(row['root_pid']) if row['root_pid'] is not None else ''
         service = row['service']
+        name = row.get('name', service)
+        count = str(row['process_count']) if 'process_count' in row else ''
 
         # Aggregate proportional memory per executable name (prefer /proc/<pid>/comm).
         # PSS splits shared pages across every process mapping them, so summing it
@@ -377,7 +461,7 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
             exes_str = exes_str[:exes_width-3] + '...'
 
         memory_col = bold(f"{memory_str:>9}", watch_mode)
-        row_text = f"{total_str:>9} {memory_col} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {service:40} {exes_str}"
+        row_text = f"{total_str:>9} {memory_col} {shmem_str:>9} {swap_str:>9} {pid_str:>{max_pid_width}} {count:>5} {name:{name_width}} {exes_str}"
         if is_tty and service == '[free]':
             available_bytes = row.get('available_bytes')
             total_mem = row.get('total_bytes') or 0
@@ -391,6 +475,7 @@ def print_cgroups_table(data, watch_mode=False, file=sys.stdout):
         elif is_tty and service == '[tmpfs]':
             row_text = color(row_text, CYAN, True)
         print(row_text, file=file)
+    print('\n'.join(CGROUPS_LEGEND), file=file)
 
 
 def print_processes_table(data, title=None, watch_mode=False, file=sys.stdout):
@@ -439,7 +524,8 @@ def print_processes_table(data, title=None, watch_mode=False, file=sys.stdout):
 def print_jsonl(data, include_processes=False, file=sys.stdout):
     """Print data in JSON Lines format."""
     for row in data:
-        output = {k: v for k, v in row.items() if k not in ['cgroup_path', 'pids']}
+        output = {k: v for k, v in row.items() if k not in ['processes', 'pids']}
+        output['total_bytes'] = row['memory_bytes'] + (row['swap_bytes'] or 0)
         # Add a simple exe field (first executable name) to make grouping by executable easier with jq
         exe = None
         exes = row.get('executables') or []
@@ -447,71 +533,76 @@ def print_jsonl(data, include_processes=False, file=sys.stdout):
             exe = exes[0]
         output['exe'] = exe
         if include_processes:
-            process_fields = ('pid', 'comm', 'rss_bytes', 'file_bytes', 'anon_bytes', 'swap_bytes', 'shmem_bytes')
-            output['processes'] = [
-                {key: p[key] for key in process_fields}
-                for p in row['processes']
-            ]
-        else:
-            output['processes'] = [
-                {key: value for key, value in p.items() if key != 'comm'}
-                for p in row['processes']
-            ]
+            output['processes'] = row['processes']
         print(json.dumps(output), file=file)
 
 
 def show_cgroup_processes(cgroup_name, limit=10, watch_mode=False, file=sys.stdout):
-    """Show individual process memory usage for a specific cgroup."""
-    for cgroup_dir, _files in iter_cgroup_dirs():
-        if cgroup_dir.name != cgroup_name:
-            continue
+    """Show processes in a selected cgroup and all of its descendants.
 
-        procs_file = cgroup_dir / "cgroup.procs"
-        try:
-            pids = [int(p) for p in procs_file.read_text().strip().split('\n') if p]
-            if not pids:
+    Select by full unit name, full path, or a unique displayed app name.
+    """
+    rows = collect_cgroup_data()
+    grouped = [row for row in rows if cgroup_name in (row['service'], row['cgroup_path'])]
+    grouped = grouped or [row for row in rows if row['name'] == cgroup_name]
+    entries = list(iter_cgroup_dirs())
+    exact = [directory for directory, _files in entries
+             if cgroup_name in (directory.name, str(directory))]
+    if exact:
+        matches = exact
+    elif len(grouped) == 1:
+        matches = [Path(grouped[0]['cgroup_path'])]
+    else:
+        matches = [directory for directory, _files in entries
+                   if cgroup_display_name(directory.name) == cgroup_name]
+    if len(matches) != 1:
+        reason = 'is ambiguous' if matches else 'not found'
+        print(f"Cgroup '{cgroup_name}' {reason}", file=sys.stderr)
+        return False
+    selected = matches[0]
+    if len(grouped) == 1 and grouped[0]['cgroup_path'] == str(selected):
+        pids = set(grouped[0]['pids'])
+    else:
+        pids = set()
+        for directory, files in entries:
+            if directory != selected and selected not in directory.parents:
+                continue
+            if 'cgroup.procs' not in files:
+                continue
+            try:
+                pids.update(int(pid) for pid in (directory / 'cgroup.procs').read_text().split())
+            except (OSError, ValueError):
                 continue
 
-            # Collect process data
-            processes = []
-            for pid in pids:
-                cmdline = get_proc_cmdline(pid) or get_proc_comm(pid)
-                mem = get_proc_memory(pid)
-                if cmdline:
-                    processes.append({
-                        'pid': pid,
-                        'cmdline': cmdline,
-                        'proportional': get_proc_proportional(pid),
-                        **mem
-                    })
-
-            # Sort by proportional total (PSS + proportional swap), RSS on fallback.
-            def sort_key(p):
-                pss, _shmem, swap_pss = effective_proportional(p)
-                return pss + swap_pss
-            processes.sort(key=sort_key, reverse=True)
-
-            # Apply limit
-            if limit > 0:
-                processes = processes[:limit]
-
-            # Use print_processes_table to display processes
-            print_processes_table(processes, title=f"Cgroup: {cgroup_dir}", watch_mode=watch_mode, file=file)
-
-            return True
-
-        except (FileNotFoundError, ValueError, PermissionError):
-            continue
-
-    print(f"Cgroup '{cgroup_name}' not found", file=sys.stderr)
-    return False
+    processes = []
+    for pid in sorted(pids):
+        cmdline = get_proc_cmdline(pid) or get_proc_comm(pid)
+        if cmdline:
+            processes.append({
+                'pid': pid,
+                'cmdline': cmdline,
+                'proportional': get_proc_proportional(pid),
+                **get_proc_memory(pid),
+            })
+    def total(proc):
+        pss, _shmem, swap = effective_proportional(proc)
+        return pss + swap
+    processes.sort(key=total, reverse=True)
+    if limit > 0:
+        processes = processes[:limit]
+    if not processes:
+        print(f'Cgroup: {selected} (no processes)', file=file)
+    else:
+        print_processes_table(processes, title=f'Cgroup: {selected}', watch_mode=watch_mode, file=file)
+    return True
 
 
 def run_once(args, limit=None, file=sys.stdout):
     if limit is None:
         limit = args.limit
+    styled = args.watch and sys.stdout.isatty()
     if args.processes:
-        if not show_cgroup_processes(args.processes, limit, watch_mode=args.watch, file=file) and not args.watch:
+        if not show_cgroup_processes(args.processes, limit, watch_mode=styled, file=file) and not args.watch:
             sys.exit(1)
         return None
 
@@ -528,7 +619,7 @@ def run_once(args, limit=None, file=sys.stdout):
     if args.json:
         print_jsonl(data, include_processes=args.include_processes, file=file)
     else:
-        print_cgroups_table(data, watch_mode=args.watch, file=file)
+        print_cgroups_table(data, watch_mode=styled, file=file)
     return data
 
 
@@ -537,37 +628,30 @@ def main():
     parser.add_argument('--json', action='store_true', help='Output in JSON Lines format')
     parser.add_argument('--processes', metavar='CGROUP', help='Show individual process memory for a specific cgroup')
     parser.add_argument('--include-processes', action='store_true', help='Include process details in JSON output')
-    parser.add_argument('-n', '--limit', type=int, default=10, help='Number of top entries to show (default: 10, use 0 for all)')
+    parser.add_argument('-n', '--limit', type=nonnegative_limit, default=10, help='Number of entries in one-shot output (default: 10, use 0 for all; watch shows all)')
     parser.add_argument('--watch', action='store_true', help='Refresh output periodically')
-    parser.add_argument('--interval', type=int, default=2, help='Refresh interval in seconds (default: 2)')
+    parser.add_argument('--interval', type=positive_interval, default=2, help='Refresh interval in seconds (default: 2)')
+    parser.epilog = (
+        ' '.join(CGROUPS_LEGEND) + ' App slices include descendant processes. Detached JCEF scopes are '
+        'attributed to their launching app in the display; JSON records included '
+        'and excluded cgroup paths. Watch controls: Up/Down, PgUp/PgDn, Home/End, q.'
+    )
     args = parser.parse_args()
 
     try:
         if args.watch:
-            # Hide cursor while watching
-            print("\033[?25l", end="", flush=True)
-            try:
+            with WatchDisplay(
+                enabled=not args.json,
+                header_lines=2 if args.processes else 1,
+                footer_lines=0 if args.processes or args.json else len(CGROUPS_LEGEND),
+            ) as display:
                 while True:
                     buf = io.StringIO()
                     data = run_once(args, limit=0, file=buf)
-                    output = buf.getvalue().rstrip('\n')
-                    terminal_height = shutil.get_terminal_size().lines
-                    lines = output.split('\n')
-                    if len(lines) > terminal_height:
-                        lines = lines[:terminal_height]
-                    output = '\n'.join(lines)
-                    if data and not args.json and not args.processes:
-                        print(f"\033]2;{build_watch_title(data)}\007", end="", flush=True)
-                    else:
-                        print("\033]2;cgroups-top (watch)\007", end="", flush=True)
-                    # Clear screen and move to top (ANSI escape codes)
-                    # \033[H: Move cursor to home (top-left)
-                    # \033[J: Clear from cursor to end of screen
-                    print(f"\033[H\033[J{output}", end="", flush=True)
-                    time.sleep(args.interval)
-            finally:
-                # Restore cursor
-                print("\033[?25h", flush=True)
+                    title = build_watch_title(data) if data and not args.json else 'cgroups-top'
+                    display.render(buf.getvalue().rstrip('\n'), title)
+                    if not display.wait(args.interval):
+                        break
         else:
             run_once(args)
     except KeyboardInterrupt:
