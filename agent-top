@@ -1,0 +1,945 @@
+#!/usr/bin/env python3
+"""Display live memory used by local coding-agent process trees."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from top_common import (
+    WatchDisplay,
+    human_size,
+    nonnegative_limit,
+    positive_interval,
+    read_cgroup_memory,
+)
+
+CYAN = "\033[36m"
+RESET = "\033[0m"
+
+AGENT_LEGEND = (
+    'Agents/services: Memory = PSS (RSS fallback); Swap = proportional swap.',
+    'Accounting difference = cgroup counters - measured processes; may be negative.',
+    'Cgroup RAM excludes inactive file cache; active cache and kernel memory remain.',
+    'Total = Memory + Swap; Shmem is included in Memory.',
+)
+
+PROVIDER_EXECUTABLES = {
+    "aider": {"aider", "aider-chat"},
+    "amp": {"amp"},
+    "claude": {"claude"},
+    "codex": {"codex", "codex-linux-sandbox"},
+    "gemini": {"gemini"},
+    "goose": {"goose"},
+    "opencode": {"opencode"},
+    "pi": {"pi"},
+}
+
+SCRIPT_EXECUTABLES = {
+    "aider": {"aider", "aider.py"},
+    "claude": {"claude", "claude.js"},
+    "codex": {"codex", "codex.js"},
+    "gemini": {"gemini", "gemini.js"},
+    "opencode": {"opencode", "opencode.js"},
+    "pi": {"pi", "pi.js"},
+}
+
+
+@dataclass(frozen=True)
+class ProcessInfo:
+    pid: int
+    ppid: int
+    name: str
+    executable: str
+    argv: tuple[str, ...]
+    cwd: str | None
+    paseo_agent_id: str | None
+    paseo_agent_cwd: str | None
+    cgroup_path: str | None
+    rss_kib: int
+    rss_shmem_kib: int
+    swap_kib: int
+
+
+@dataclass(frozen=True)
+class ProcessMemory:
+    rss_kib: int
+    pss_kib: int | None
+    rss_shmem_kib: int
+    pss_shmem_kib: int | None
+    swap_kib: int
+    swap_pss_kib: int | None
+
+    @property
+    def pss_available(self) -> bool:
+        return self.pss_kib is not None
+
+    @property
+    def effective_pss_kib(self) -> int:
+        return self.rss_kib if self.pss_kib is None else self.pss_kib
+
+    @property
+    def effective_pss_shmem_kib(self) -> int:
+        return self.rss_shmem_kib if self.pss_shmem_kib is None else self.pss_shmem_kib
+
+    @property
+    def effective_swap_pss_kib(self) -> int:
+        return self.swap_kib if self.swap_pss_kib is None else self.swap_pss_kib
+
+    @property
+    def effective_total_kib(self) -> int:
+        return self.effective_pss_kib + self.effective_swap_pss_kib
+
+
+@dataclass
+class AgentGroup:
+    key: str
+    source: str
+    agent_id: str | None
+    root_pid: int | None
+    pids: list[int] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MeasuredProcess:
+    process: ProcessInfo
+    memory: ProcessMemory
+
+
+@dataclass(frozen=True)
+class AgentMeasurement:
+    key: str
+    source: str
+    agent_id: str | None
+    name: str
+    provider: str
+    cwd: str | None
+    root_pid: int | None
+    processes: tuple[MeasuredProcess, ...]
+    pss_kib: int
+    pss_shmem_kib: int
+    swap_pss_kib: int
+    pss_complete: bool
+    synthetic: bool = False
+
+    @property
+    def total_kib(self) -> int:
+        return self.pss_kib + self.swap_pss_kib
+
+
+@dataclass(frozen=True)
+class CgroupUsage:
+    path: str
+    memory_kib: int
+    shmem_kib: int
+    swap_kib: int
+
+
+def parse_status(content: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in content.splitlines():
+        key, separator, value = line.partition(":")
+        if separator:
+            values[key] = value.strip()
+    return values
+
+
+def parse_kib(value: str | None) -> int:
+    if not value:
+        return 0
+    token = value.split(maxsplit=1)[0]
+    try:
+        return int(token)
+    except ValueError:
+        return 0
+
+
+def parse_environment(content: bytes) -> tuple[str | None, str | None]:
+    agent_id = None
+    agent_cwd = None
+    for entry in content.split(b"\0"):
+        key, separator, value = entry.partition(b"=")
+        if not separator:
+            continue
+        if key == b"PASEO_AGENT_ID":
+            agent_id = value.decode(errors="replace") or None
+        elif key == b"PASEO_AGENT_CWD":
+            agent_cwd = value.decode(errors="replace") or None
+    return agent_id, agent_cwd
+
+
+def parse_cgroup(content: str) -> str | None:
+    for line in content.splitlines():
+        hierarchy, separator, remainder = line.partition(":")
+        if not separator:
+            continue
+        controllers, separator, path = remainder.partition(":")
+        if separator and hierarchy == "0" and not controllers and path.startswith("/"):
+            return path
+    return None
+
+
+def read_link(path: Path) -> str | None:
+    try:
+        return os.readlink(path)
+    except OSError:
+        return None
+
+
+def read_process(proc_root: Path, pid: int, uid: int) -> ProcessInfo | None:
+    process_dir = proc_root / str(pid)
+    try:
+        status = parse_status((process_dir / "status").read_text(errors="replace"))
+        process_uid = int(status["Uid"].split()[0])
+        if process_uid != uid:
+            return None
+        ppid = int(status["PPid"])
+        argv = tuple(
+            part.decode(errors="replace")
+            for part in (process_dir / "cmdline").read_bytes().split(b"\0")
+            if part
+        )
+        try:
+            environment = (process_dir / "environ").read_bytes()
+        except OSError:
+            environment = b""
+        try:
+            cgroup_path = parse_cgroup((process_dir / "cgroup").read_text(errors="replace"))
+        except OSError:
+            cgroup_path = None
+    except (KeyError, OSError, ValueError):
+        return None
+
+    agent_id, agent_cwd = parse_environment(environment)
+    executable_path = read_link(process_dir / "exe")
+    executable = os.path.basename(executable_path) if executable_path else ""
+    return ProcessInfo(
+        pid=pid,
+        ppid=ppid,
+        name=status.get("Name", ""),
+        executable=executable,
+        argv=argv,
+        cwd=read_link(process_dir / "cwd"),
+        paseo_agent_id=agent_id,
+        paseo_agent_cwd=agent_cwd,
+        cgroup_path=cgroup_path,
+        rss_kib=parse_kib(status.get("VmRSS")),
+        rss_shmem_kib=parse_kib(status.get("RssShmem")),
+        swap_kib=parse_kib(status.get("VmSwap")),
+    )
+
+
+def scan_processes(
+    proc_root: Path = Path("/proc"), uid: int | None = None
+) -> dict[int, ProcessInfo]:
+    target_uid = os.getuid() if uid is None else uid
+    processes: dict[int, ProcessInfo] = {}
+    try:
+        entries = proc_root.iterdir()
+    except OSError:
+        return processes
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if proc_root == Path("/proc") and pid == os.getpid():
+            continue
+        process = read_process(proc_root, pid, target_uid)
+        if process:
+            processes[process.pid] = process
+    return processes
+
+
+def normalized_name(value: str) -> str:
+    name = os.path.basename(value).lower()
+    return name.removesuffix(".exe")
+
+
+def provider_for_process(process: ProcessInfo) -> str | None:
+    direct_names = {
+        normalized_name(process.executable),
+        normalized_name(process.name),
+    }
+    if process.argv:
+        direct_names.add(normalized_name(process.argv[0]))
+    for provider, names in PROVIDER_EXECUTABLES.items():
+        if direct_names & names:
+            return provider
+
+    for argument in process.argv[1:4]:
+        script_name = normalized_name(argument)
+        for provider, names in SCRIPT_EXECUTABLES.items():
+            if script_name in names:
+                return provider
+
+    for index, argument in enumerate(process.argv[:-1]):
+        if argument != "-m":
+            continue
+        module = process.argv[index + 1].split(".", maxsplit=1)[0].lower()
+        if module in PROVIDER_EXECUTABLES:
+            return module
+    return None
+
+
+def inherited_paseo_id(pid: int, processes: dict[int, ProcessInfo]) -> str | None:
+    seen: set[int] = set()
+    current = processes.get(pid)
+    while current and current.pid not in seen:
+        seen.add(current.pid)
+        if current.paseo_agent_id:
+            return current.paseo_agent_id
+        current = processes.get(current.ppid)
+    return None
+
+
+def nearest_detected_root(
+    pid: int,
+    processes: dict[int, ProcessInfo],
+    detected_roots: set[int],
+) -> int | None:
+    seen: set[int] = set()
+    current = processes.get(pid)
+    while current and current.pid not in seen:
+        seen.add(current.pid)
+        if current.pid in detected_roots:
+            return current.pid
+        current = processes.get(current.ppid)
+    return None
+
+
+def detected_agent_roots(processes: dict[int, ProcessInfo], unassigned: set[int]) -> set[int]:
+    candidates = {
+        pid: provider
+        for pid in unassigned
+        if (provider := provider_for_process(processes[pid])) is not None
+    }
+    roots: set[int] = set()
+    for pid, provider in candidates.items():
+        seen = {pid}
+        current = processes.get(processes[pid].ppid)
+        while current and current.pid not in seen:
+            seen.add(current.pid)
+            ancestor_provider = candidates.get(current.pid)
+            if ancestor_provider is not None:
+                if ancestor_provider != provider:
+                    roots.add(pid)
+                break
+            current = processes.get(current.ppid)
+        else:
+            roots.add(pid)
+    return roots
+
+
+def discover_groups(processes: dict[int, ProcessInfo]) -> list[AgentGroup]:
+    groups: dict[str, AgentGroup] = {}
+    unassigned: set[int] = set()
+
+    for pid in processes:
+        agent_id = inherited_paseo_id(pid, processes)
+        if agent_id:
+            key = f"paseo:{agent_id}"
+            group = groups.setdefault(
+                key,
+                AgentGroup(key=key, source="paseo", agent_id=agent_id, root_pid=None),
+            )
+            group.pids.append(pid)
+        else:
+            unassigned.add(pid)
+
+    detected_roots = detected_agent_roots(processes, unassigned)
+    for pid in unassigned:
+        root_pid = nearest_detected_root(pid, processes, detected_roots)
+        if root_pid is None:
+            continue
+        key = f"detected:{root_pid}"
+        group = groups.setdefault(
+            key,
+            AgentGroup(
+                key=key,
+                source="detected",
+                agent_id=None,
+                root_pid=root_pid,
+            ),
+        )
+        group.pids.append(pid)
+
+    for group in groups.values():
+        group.pids.sort()
+        if group.root_pid is None:
+            members = set(group.pids)
+            roots = [pid for pid in group.pids if processes[pid].ppid not in members]
+            group.root_pid = min(roots or group.pids)
+    return list(groups.values())
+
+
+def parse_smaps_rollup(
+    content: str,
+    rss_shmem_kib: int = 0,
+    rss_kib: int = 0,
+    swap_kib: int = 0,
+) -> ProcessMemory:
+    values = parse_status(content)
+    return ProcessMemory(
+        rss_kib=parse_kib(values["Rss"]) if "Rss" in values else rss_kib,
+        pss_kib=parse_kib(values["Pss"]) if "Pss" in values else None,
+        rss_shmem_kib=rss_shmem_kib,
+        pss_shmem_kib=parse_kib(values["Pss_Shmem"]) if "Pss_Shmem" in values else None,
+        swap_kib=parse_kib(values["Swap"]) if "Swap" in values else swap_kib,
+        swap_pss_kib=parse_kib(values["SwapPss"]) if "SwapPss" in values else None,
+    )
+
+
+def read_memory(proc_root: Path, process: ProcessInfo) -> ProcessMemory | None:
+    process_dir = proc_root / str(process.pid)
+    try:
+        return parse_smaps_rollup(
+            (process_dir / "smaps_rollup").read_text(errors="replace"),
+            process.rss_shmem_kib,
+            process.rss_kib,
+            process.swap_kib,
+        )
+    except PermissionError:
+        return ProcessMemory(
+            rss_kib=process.rss_kib,
+            pss_kib=None,
+            rss_shmem_kib=process.rss_shmem_kib,
+            pss_shmem_kib=None,
+            swap_kib=process.swap_kib,
+            swap_pss_kib=None,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return ProcessMemory(
+            rss_kib=process.rss_kib,
+            pss_kib=None,
+            rss_shmem_kib=process.rss_shmem_kib,
+            pss_shmem_kib=None,
+            swap_kib=process.swap_kib,
+            swap_pss_kib=None,
+        )
+
+
+@dataclass(frozen=True)
+class EffectiveTotals:
+    pss_kib: int
+    pss_shmem_kib: int
+    swap_pss_kib: int
+    complete: bool
+
+
+def aggregate_effective(memories: Iterable[ProcessMemory]) -> EffectiveTotals:
+    materialized = tuple(memories)
+    return EffectiveTotals(
+        pss_kib=sum(memory.effective_pss_kib for memory in materialized),
+        pss_shmem_kib=sum(memory.effective_pss_shmem_kib for memory in materialized),
+        swap_pss_kib=sum(memory.effective_swap_pss_kib for memory in materialized),
+        complete=all(memory.pss_available for memory in materialized),
+    )
+
+
+def paseo_scope_for_path(cgroup_path: str | None) -> str | None:
+    """Select the outermost Paseo cgroup so slice totals include scopes once."""
+    if not cgroup_path:
+        return None
+    parts = Path(cgroup_path).parts
+    for index in range(1, len(parts)):
+        if "paseo" in parts[index].lower():
+            return str(Path(*parts[: index + 1]))
+    return None
+
+
+def parse_cgroup_stat(content: str) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for line in content.splitlines():
+        key, separator, value = line.partition(" ")
+        if not separator:
+            continue
+        try:
+            values[key] = int(value)
+        except ValueError:
+            continue
+    return values
+
+
+def read_cgroup_usage(
+    path: str,
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> CgroupUsage | None:
+    try:
+        usage = read_cgroup_memory(cgroup_root / path.lstrip("/"))
+    except (OSError, ValueError):
+        return None
+    return CgroupUsage(
+        path=path,
+        memory_kib=usage['memory_bytes'] // 1024,
+        shmem_kib=usage['shmem_bytes'] // 1024,
+        swap_kib=usage['swap_bytes'] // 1024,
+    )
+
+
+def load_paseo_metadata() -> dict[str, dict[str, str]]:
+    executable = shutil.which("paseo")
+    if not executable:
+        return {}
+    try:
+        result = subprocess.run(
+            [executable, "ls", "--global", "--json"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+        )
+        if result.returncode != 0:
+            return {}
+        payload = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, list):
+        return {}
+    return {
+        item["id"]: item
+        for item in payload
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+
+
+def group_provider(group: AgentGroup, processes: dict[int, ProcessInfo]) -> str:
+    root = processes.get(group.root_pid or -1)
+    if root:
+        provider = provider_for_process(root)
+        if provider:
+            return provider
+    for pid in group.pids:
+        provider = provider_for_process(processes[pid])
+        if provider:
+            return provider
+    return "agent"
+
+
+def measure_groups(
+    processes: dict[int, ProcessInfo],
+    groups: Iterable[AgentGroup],
+    metadata: dict[str, dict[str, str]],
+    proc_root: Path = Path("/proc"),
+) -> list[AgentMeasurement]:
+    measurements: list[AgentMeasurement] = []
+    for group in groups:
+        measured_processes: list[MeasuredProcess] = []
+        for pid in group.pids:
+            memory = read_memory(proc_root, processes[pid])
+            if memory:
+                measured_processes.append(MeasuredProcess(processes[pid], memory))
+        if not measured_processes:
+            continue
+
+        paseo = metadata.get(group.agent_id or "", {})
+        provider = paseo.get("provider") or group_provider(group, processes)
+        if group.agent_id:
+            name = paseo.get("name") or f"{provider} pid {group.root_pid}"
+        else:
+            name = f"{provider} pid {group.root_pid}"
+        agent_cwd = next(
+            (
+                item.process.paseo_agent_cwd
+                for item in measured_processes
+                if item.process.paseo_agent_cwd
+            ),
+            None,
+        )
+        root_process = processes.get(group.root_pid or -1)
+        cwd = agent_cwd or paseo.get("cwd") or (root_process.cwd if root_process else None)
+        totals = aggregate_effective(item.memory for item in measured_processes)
+        measurements.append(
+            AgentMeasurement(
+                key=group.key,
+                source=group.source,
+                agent_id=group.agent_id,
+                name=name,
+                provider=provider,
+                cwd=cwd,
+                root_pid=group.root_pid,
+                processes=tuple(measured_processes),
+                pss_kib=totals.pss_kib,
+                pss_shmem_kib=totals.pss_shmem_kib,
+                swap_pss_kib=totals.swap_pss_kib,
+                pss_complete=totals.complete,
+            )
+        )
+    measurements.sort(key=lambda item: item.total_kib, reverse=True)
+    return measurements
+
+
+def cgroup_process_totals(
+    measurements: Iterable[AgentMeasurement],
+    scope: str,
+) -> EffectiveTotals:
+    return aggregate_effective(
+        process.memory
+        for measurement in measurements
+        for process in measurement.processes
+        if paseo_scope_for_path(process.process.cgroup_path) == scope
+    )
+
+
+def add_paseo_overhead(
+    measurements: list[AgentMeasurement],
+    processes: Iterable[ProcessInfo],
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    proc_root: Path = Path("/proc"),
+) -> list[AgentMeasurement]:
+    """Separate measured services from app and daemon accounting differences.
+
+    Each process contributes once, to an agent or a services row. The signed
+    difference between all measured processes and cgroup counters is separate.
+    """
+    processes = tuple(processes)
+    assigned_pids = {
+        process.process.pid for measurement in measurements for process in measurement.processes
+    }
+    scopes_by_kind: dict[str, set[str]] = {"app": set(), "daemon": set()}
+    for process in processes:
+        scope = paseo_scope_for_path(process.cgroup_path)
+        if scope is not None:
+            kind = "daemon" if Path(scope).name == "paseo-daemon.service" else "app"
+            scopes_by_kind[kind].add(scope)
+    result = list(measurements)
+    for kind, scopes in scopes_by_kind.items():
+        usages = [
+            usage for scope in sorted(scopes)
+            if (usage := read_cgroup_usage(scope, cgroup_root)) is not None
+        ]
+        if not usages:
+            continue
+        measured_scopes = {usage.path for usage in usages}
+        services = []
+        for process in processes:
+            if process.pid in assigned_pids:
+                continue
+            if paseo_scope_for_path(process.cgroup_path) not in measured_scopes:
+                continue
+            memory = read_memory(proc_root, process)
+            if memory is not None:
+                services.append(MeasuredProcess(process, memory))
+        service_totals = aggregate_effective(process.memory for process in services)
+        paths = ", ".join(usage.path for usage in usages)
+        if services:
+            result.append(
+                AgentMeasurement(
+                    key=f"services:paseo-{kind}",
+                    source="services",
+                    agent_id=None,
+                    name=f"[Paseo {kind} services]",
+                    provider="-",
+                    cwd=paths,
+                    root_pid=None,
+                    processes=tuple(services),
+                    pss_kib=service_totals.pss_kib,
+                    pss_shmem_kib=service_totals.pss_shmem_kib,
+                    swap_pss_kib=service_totals.swap_pss_kib,
+                    pss_complete=service_totals.complete,
+                )
+            )
+        totals = [cgroup_process_totals(measurements, usage.path) for usage in usages]
+        totals.append(service_totals)
+        result.append(
+            AgentMeasurement(
+                key=f"cgroup:paseo-{kind}",
+                source="cgroup",
+                agent_id=None,
+                name=f"[Paseo {kind} accounting difference]",
+                provider="-",
+                cwd=paths,
+                root_pid=None,
+                processes=(),
+                pss_kib=sum(usage.memory_kib for usage in usages) - sum(total.pss_kib for total in totals),
+                pss_shmem_kib=sum(usage.shmem_kib for usage in usages) - sum(total.pss_shmem_kib for total in totals),
+                swap_pss_kib=sum(usage.swap_kib for usage in usages) - sum(total.swap_pss_kib for total in totals),
+                pss_complete=all(total.complete for total in totals),
+                synthetic=True,
+            )
+        )
+    result.sort(key=lambda item: item.total_kib, reverse=True)
+    return result
+
+
+def take_snapshot(
+    metadata: dict[str, dict[str, str]],
+    proc_root: Path = Path("/proc"),
+    uid: int | None = None,
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> list[AgentMeasurement]:
+    processes = scan_processes(proc_root, uid)
+    measurements = measure_groups(processes, discover_groups(processes), metadata, proc_root)
+    return add_paseo_overhead(measurements, processes.values(), cgroup_root, proc_root)
+
+
+def format_kib(value: int | None) -> str:
+    return human_size(None if value is None else value * 1024)
+
+
+def truncate(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    if width <= 3:
+        return value[:width]
+    return value[: width - 3] + "..."
+
+
+def process_name(measured: MeasuredProcess) -> str:
+    process = measured.process
+    return process.name or process.executable or "-"
+
+
+def process_command(measured: MeasuredProcess) -> str:
+    return ' '.join(measured.process.argv) or process_name(measured)
+
+
+def process_summary(measurement: AgentMeasurement) -> str:
+    totals: dict[str, int] = {}
+    for process in measurement.processes:
+        name = process_name(process)
+        totals[name] = totals.get(name, 0) + process.memory.effective_total_kib
+    ordered = sorted(totals.items(), key=lambda item: item[1], reverse=True)
+    summary = ", ".join(f"{format_kib(total)} {name}" for name, total in ordered)
+    if not summary and measurement.synthetic:
+        return measurement.name
+    return summary
+
+
+def limited(measurements: list[AgentMeasurement], limit: int) -> list[AgentMeasurement]:
+    return measurements if limit == 0 else measurements[:limit]
+
+
+def render_table(measurements: list[AgentMeasurement], limit: int) -> str:
+    rows = limited(measurements, limit)
+    if not rows:
+        return "No local agent processes found."
+
+    pid_width = max(3, max(len(str(item.root_pid or '')) for item in rows))
+    name_width = max(len('Agent/Service'), max(len(item.name) for item in rows))
+    heading = (
+        f"{'Total':>9} {'Memory':>9} {'Shmem':>9} {'Swap':>9} "
+        f"{'PID':>{pid_width}} {'Procs':>5} {'Agent/Service':{name_width}} Executables (PSS+Swap) | Path"
+    )
+    lines = [heading]
+    for item in rows:
+        pid = str(item.root_pid) if item.root_pid is not None else ""
+        summary = process_summary(item) or "-"
+        count = str(len(item.processes)) if not item.synthetic else ''
+        line = (
+            f"{format_kib(item.total_kib):>9} "
+            f"{format_kib(item.pss_kib):>9} "
+            f"{format_kib(item.pss_shmem_kib):>9} "
+            f"{format_kib(item.swap_pss_kib):>9} "
+            f"{pid:>{pid_width}} {count:>5} {item.name:{name_width}} "
+            f"{summary} | {item.cwd or '-'}"
+        )
+        if sys.stdout.isatty():
+            line = truncate(line, shutil.get_terminal_size().columns)
+            if item.synthetic or item.source == "services":
+                line = f"{CYAN}{line}{RESET}"
+        lines.append(line)
+    lines.extend(AGENT_LEGEND)
+    return "\n".join(lines)
+
+
+def render_process_table(measurement: AgentMeasurement, limit: int = 0) -> str:
+    lines = [f'Processes: {measurement.name} | {measurement.cwd or "-"}']
+    heading = (
+        f"{'Total':>9} {'PSS':>9} {'Shmem':>9} {'Swap':>9} "
+        f"{'PID':>7} {'COMMAND'}"
+    )
+    lines.append(heading)
+    processes = sorted(
+        measurement.processes,
+        key=lambda item: item.memory.effective_total_kib,
+        reverse=True,
+    )
+    if limit > 0:
+        processes = processes[:limit]
+    for measured in processes:
+        memory = measured.memory
+        lines.append(
+            f"{format_kib(memory.effective_total_kib):>9} "
+            f"{format_kib(memory.effective_pss_kib):>9} "
+            f"{format_kib(memory.effective_pss_shmem_kib):>9} "
+            f"{format_kib(memory.effective_swap_pss_kib):>9} "
+            f"{measured.process.pid:>7} {process_command(measured)}"
+        )
+    if not measurement.processes:
+        lines.append("No processes are attached to this synthetic row.")
+    return "\n".join(lines)
+
+
+def kib_to_bytes(value: int | None) -> int | None:
+    return None if value is None else value * 1024
+
+
+def process_to_json(measured: MeasuredProcess) -> dict[str, object]:
+    memory = measured.memory
+    return {
+        "pid": measured.process.pid,
+        "ppid": measured.process.ppid,
+        "comm": process_name(measured),
+        "cmdline": process_command(measured),
+        "total_bytes": kib_to_bytes(memory.effective_total_kib),
+        "pss_bytes": kib_to_bytes(memory.effective_pss_kib),
+        "shmem_bytes": kib_to_bytes(memory.effective_pss_shmem_kib),
+        "swap_bytes": kib_to_bytes(memory.effective_swap_pss_kib),
+        "pss_available": memory.pss_available,
+    }
+
+
+def measurement_to_json(
+    item: AgentMeasurement,
+    include_processes: bool,
+) -> dict[str, object]:
+    output: dict[str, object] = {
+        "key": item.key,
+        "name": item.name,
+        "source": item.source,
+        "provider": item.provider,
+        "synthetic": item.synthetic,
+        "agent_id": item.agent_id,
+        "path": item.cwd,
+        "root_pid": item.root_pid,
+        "process_count": len(item.processes),
+        "total_bytes": kib_to_bytes(item.total_kib),
+        "pss_bytes": None if item.synthetic else kib_to_bytes(item.pss_kib),
+        "memory_bytes": kib_to_bytes(item.pss_kib),
+        "shmem_bytes": kib_to_bytes(item.pss_shmem_kib),
+        "swap_bytes": kib_to_bytes(item.swap_pss_kib),
+        "pss_complete": None if item.synthetic else item.pss_complete,
+    }
+    if include_processes:
+        output["processes"] = [process_to_json(process) for process in item.processes]
+    return output
+
+
+def render_json_lines(
+    measurements: list[AgentMeasurement],
+    include_processes: bool,
+) -> str:
+    return "\n".join(
+        json.dumps(measurement_to_json(item, include_processes)) for item in measurements
+    )
+
+
+def resolve_measurement(
+    measurements: list[AgentMeasurement],
+    selector: str,
+) -> AgentMeasurement | None:
+    exact = [
+        item
+        for item in measurements
+        if selector in {item.key, item.agent_id, item.name, str(item.root_pid)}
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    prefix = [
+        item
+        for item in measurements
+        if item.key.startswith(selector)
+        or (item.agent_id is not None and item.agent_id.startswith(selector))
+    ]
+    return prefix[0] if len(prefix) == 1 else None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Display local coding-agent memory usage")
+    parser.add_argument("--json", action="store_true", help="output JSON Lines")
+    parser.add_argument(
+        "--processes",
+        metavar="AGENT",
+        help="show individual processes for an agent ID, PID, key, or exact row name",
+    )
+    parser.add_argument(
+        "--include-processes",
+        action="store_true",
+        help="include process details in JSON output",
+    )
+    parser.add_argument(
+        "-n",
+        "--limit",
+        type=nonnegative_limit,
+        default=10,
+        help="number of rows in one-shot output (default: 10, use 0 for all; watch shows all)",
+    )
+    parser.add_argument("--watch", action="store_true", help="refresh output periodically")
+    parser.add_argument(
+        "--interval",
+        type=positive_interval,
+        default=2.0,
+        help="refresh interval in seconds (default: 2)",
+    )
+    parser.epilog = (
+        " ".join(AGENT_LEGEND) + " PSS splits shared pages across the processes "
+        "that map them. A process whose smaps_rollup is unreadable contributes its RSS instead. "
+        "Paseo app and daemon services rows contain processes outside agent rows. "
+        "Accounting difference rows do not represent process PSS. Their JSON pss_bytes and "
+        "pss_complete fields are null. Watch controls: Up/Down, PgUp/PgDn, Home/End, q."
+    )
+    return parser
+
+
+def render_once(
+    measurements: list[AgentMeasurement],
+    args: argparse.Namespace,
+) -> tuple[str, bool]:
+    if args.processes:
+        measurement = resolve_measurement(measurements, args.processes)
+        if not measurement:
+            return f"No unique agent found matching: {args.processes}", False
+        return render_process_table(measurement, 0 if args.watch else args.limit), True
+    if args.json:
+        return render_json_lines(measurements, args.include_processes), True
+    return render_table(measurements, 0 if args.watch else args.limit), True
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    metadata: dict[str, dict[str, str]] = {}
+    metadata_checked_at = float("-inf")
+    try:
+        with WatchDisplay(
+            enabled=args.watch and not args.json,
+            header_lines=2 if args.processes else 1,
+            footer_lines=0 if args.processes or args.json else len(AGENT_LEGEND),
+        ) as display:
+            while True:
+                now = time.monotonic()
+                if now - metadata_checked_at >= 10:
+                    refreshed_metadata = load_paseo_metadata()
+                    if refreshed_metadata:
+                        metadata = refreshed_metadata
+                    metadata_checked_at = now
+                measurements = take_snapshot(metadata)
+                output, success = render_once(measurements, args)
+                if not success:
+                    print(output, file=sys.stderr, flush=True)
+                    if not args.watch:
+                        return 1
+                else:
+                    memory = sum(item.pss_kib for item in measurements)
+                    shmem = sum(item.pss_shmem_kib for item in measurements)
+                    swap = sum(item.swap_pss_kib for item in measurements)
+                    title = f'agent-top {format_kib(memory)} {format_kib(shmem)} {format_kib(swap)}'
+                    display.render(output, title)
+                if not args.watch or not display.wait(args.interval):
+                    return 0
+    except (KeyboardInterrupt, BrokenPipeError):
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
