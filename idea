@@ -13,6 +13,12 @@ import sys
 
 REAL_IDEA = os.path.expanduser("~/.local/bin/idea")
 
+# Directories that open a different project than their nearest .idea ancestor.
+MAPPED_PROJECTS = {
+    os.path.expanduser("~/Performek/jurnify/core"):
+        os.path.expanduser("~/Performek/jurnify/jurnify"),
+}
+
 
 def parse_args(argv):
     line = None
@@ -69,6 +75,19 @@ def project_root(path):
     return None
 
 
+def mapped_project(path):
+    """The longest matching directory wins, so a rule scoped to a nested
+    directory beats a broader rule covering the same path.  A mapped project
+    dir that no longer exists yields None, like no match at all.
+    """
+    for directory in sorted(MAPPED_PROJECTS, key=len, reverse=True):
+        if path != directory and not path.startswith(os.path.join(directory, "")):
+            continue
+        project = os.path.abspath(MAPPED_PROJECTS[directory])
+        return project if os.path.isdir(project) else None
+    return None
+
+
 paths, line, column = parse_args(sys.argv[1:])
 
 line_col = []
@@ -118,8 +137,9 @@ else:
         sys.exit(rc)
 
     # A directory with no .idea of its own makes IDEA offer to create a project.
-    root = project_root(path) or toplevel
-    launch_paths = [project_root(path) or path]
+    mapped = mapped_project(path)
+    root = mapped or project_root(path) or toplevel
+    launch_paths = [mapped or project_root(path) or path]
     target_file = None
 
 # Without an owning project there is no window to raise deterministically: open
@@ -153,7 +173,6 @@ in_project_file = rf"^{proj}\b.*{re.escape(os.path.basename(target_file))}" if t
 # any form other than the bare name; the bare form is only the loading state.
 populated = (label, plain, nofile)
 
-# A directory or project-only target: open it and raise it.
 if target_file is None:
     rc = launch(launch_paths).wait()
     wl_focus((label, plain, nofile, bare), 10)
