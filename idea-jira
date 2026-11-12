@@ -63,7 +63,7 @@ def optional_json_for_path(method: str, endpoint: str, project_path: str):
 
 
 def jira_summary(issue: str) -> str:
-    payload = json.loads(command_output(["jira", "issue", "view", issue, "--raw"]))
+    payload = json.loads(command_output(["acli", "jira", "workitem", "view", issue, "--json"]))
     return payload["fields"]["summary"]
 
 
