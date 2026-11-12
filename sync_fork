@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Push local release branches and tags to the configured origin fork."""
+
+import argparse
+import subprocess
+import sys
+
+
+def git(*args, check=True):
+    return subprocess.run(['git', *args], text=True, capture_output=True, check=check)
+
+
+def config(name, default=None):
+    result = git('config', '--get', name, check=False)
+    if result.returncode == 1:
+        return default
+    result.check_returncode()
+    return result.stdout.strip()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('-p', '--push', action='store_true', help='also push matching topic branches')
+    args = parser.parse_args()
+    upstream = config('sync.upstreamRepo', 'upstream')
+    releases = config('sync.releaseBranches')
+    if not releases:
+        parser.error('configure sync.releaseBranches first')
+    if upstream == 'origin':
+        print('Upstream is origin; no fork to sync.')
+        return
+    release_tips = []
+    for branch in releases.split():
+        ref = f'refs/heads/{branch}'
+        local_tip = git('rev-parse', '--verify', f'{ref}^{{commit}}').stdout.strip()
+        upstream_tip = git('ls-remote', '--exit-code', '--heads', upstream, ref).stdout.split()[0]
+        if local_tip != upstream_tip:
+            print(f'Release branch {branch} differs from {upstream}; synchronize it first', file=sys.stderr)
+            sys.exit(3)
+        release_tips.append((branch, local_tip))
+    for branch, local_tip in release_tips:
+        print(f'Pushing release branch {branch} to origin', flush=True)
+        git('push', '-f', 'origin', f'{local_tip}:refs/heads/{branch}')
+    print('Pushing tags to origin', flush=True)
+    git('push', 'origin', '--tags')
+    if args.push:
+        prefixes = config('sync.topicBranchPrefix', 't_').split()
+        branches = git('for-each-ref', '--format=%(refname:short)', 'refs/heads/').stdout.splitlines()
+        for branch in branches:
+            if not branch.startswith(tuple(prefixes)):
+                continue
+            comparison = git('rev-list', '--max-count=1', f'origin/{branch}..{branch}', check=False)
+            if comparison.returncode == 0 and not comparison.stdout:
+                continue
+            print(f'Pushing topic branch {branch} to origin', flush=True)
+            result = git('push', '--force-with-lease', 'origin', branch, check=False)
+            if result.returncode:
+                git('push', 'origin', branch)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except subprocess.CalledProcessError as exc:
+        print(exc.stderr.strip() or str(exc), file=sys.stderr)
+        sys.exit(exc.returncode)

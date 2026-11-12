@@ -7,8 +7,7 @@
 # Author: Manik Surtani (http://github.com/maniksurtani)
 #         Galder Zamarreño (http://github.com/galderz)
 #         Dan Berindei (http://github.com/danberindei)
-# Description: This script updates a fork of an upstream repository with new
-#              changes in the upstream.  It is designed to be run on a local
+# Description: This script updates local branches from an upstream repository.  It is designed to be run on a local
 #              clone of the fork.  In addition to updating necessary branches,
 #              the script also rebases any topic branches that may exist.
 #
@@ -34,7 +33,6 @@ import subprocess
 import getopt
 
 isdebug = False
-push_to_origin = False
 upstream_repo = None
 release_branches = None
 topic_branch_prefix = None
@@ -95,15 +93,6 @@ def have_local_changes():
   output = run_git("status --porcelain --untracked-files=no")
   return output != ""
 
-def is_push_needed(branch):
-  if not push_to_origin:
-    return False
-
-  try:
-    return is_rebase_needed("origin/%s" % branch, branch)
-  except Exception:
-    return True
-
 def is_rebase_needed(branch, release_branch):
   upstream_only_commit = run_git("rev-list --max-count=1 %s..%s" % (branch, release_branch))
   return upstream_only_commit != ''
@@ -133,11 +122,6 @@ def handle_release_branches():
       run_git("checkout -q %s" % checked_out_branch)
       sys.exit(3)
 
-    if upstream_repo != ORIGIN_REPO:
-      run_git("push -q -f %s %s" % (ORIGIN_REPO, relbranch))
-
-  if upstream_repo != ORIGIN_REPO:
-    run_git("push -q %s --tags" % ORIGIN_REPO)
 
 def handle_topics():
   print("Release branches are %s" % release_branches)
@@ -197,10 +181,6 @@ def handle_topics():
     if not base_branch in release_branches:
       rebase_topic_branch(branch, base_branch)
 
-  # Finally, push the modified branches to origin
-  for branch in topic_branches:
-    push_topic_branch(branch)
-
 def rebase_topic_branch(branch, base_branch):
   if is_rebase_needed(branch, base_branch):
     print("Rebasing topic branch %s on top of %s" % (branch, base_branch))
@@ -214,17 +194,6 @@ def rebase_topic_branch(branch, base_branch):
     #print("Rebase not necessary for topic branch %s" % branch)
     pass
 
-def push_topic_branch(branch):
-  if upstream_repo != ORIGIN_REPO and is_push_needed(branch):
-    print("Pushing branch %s to %s" % (branch, ORIGIN_REPO))
-    try:
-      # This will fail if the remote branch doesn't exist yet
-      run_git("push -q --force-with-lease %s %s" % (ORIGIN_REPO, branch))
-    except Exception:
-      run_git("push -q %s %s" % (ORIGIN_REPO, branch))
-  else:
-    pass
-
 def is_not_empty(n):
  return n != ''
 
@@ -232,19 +201,16 @@ def parse_args():
   global upstream_repo
   global release_branches
   global isdebug
-  global push_to_origin
   global topic_branch_prefix
   try:
-    opts, args = getopt.getopt(sys.argv[1:], "hdpu:b:", ["help", "debug", "push", "upstream=", "branches="])
+    opts, args = getopt.getopt(sys.argv[1:], "hdu:b:", ["help", "debug", "upstream=", "branches="])
   except getopt.GetoptError as err:
     # print help information and exit:
     print(str(err)) # will print something like "option -a not recognized"
     sys.exit(2)
 
   for o, a in opts:
-    if o in ("-p", "--push"):
-      push_to_origin = True
-    elif o in ("-h", "--help"):
+    if o in ("-h", "--help"):
       usage()
       sys.exit()
     elif o in ("-d", "--debug"):
@@ -268,7 +234,7 @@ def parse_args():
     topic_branch_prefix = [DEFAULT_TOPIC_BRANCH_PREFIX]
 
 def usage():
-  print("usage: ", sys.argv[0],"[-u <upstream repo>] [-b <comma separated branches>] [-p]")
+  print("usage: ", sys.argv[0],"[-d]")
 
 def main():
   parse_args()
